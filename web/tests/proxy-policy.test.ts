@@ -11,12 +11,16 @@ import { config as proxyConfig } from "../proxy";
 // adapter that maps these decisions onto NextResponse.
 
 import {
+  ACCESS_SSO_PATH,
   CODEX_CALLBACK_API_PATH,
   CODEX_CALLBACK_PATH,
+  accessEmailFromHeaders,
   classifyToken,
+  isAccessSsoPath,
   isAuthExempt,
   isBackendPath,
   isCodexCallbackPath,
+  safeNextPath,
 } from "../lib/proxy-policy";
 
 function makeToken(payload: Record<string, unknown>): string {
@@ -98,6 +102,33 @@ test("isAuthExempt allows auth pages and Next internals", () => {
   assert.equal(isAuthExempt("/register"), true);
   assert.equal(isAuthExempt("/_next/data/build/home.json"), true);
   assert.equal(isAuthExempt("/favicon-32x32.png"), true);
+});
+
+test("Access SSO helpers accept Access email and safe next paths", () => {
+  assert.equal(isAccessSsoPath(ACCESS_SSO_PATH), true);
+  assert.equal(isAccessSsoPath("/api/v1/auth/login"), false);
+  assert.equal(
+    accessEmailFromHeaders((name) =>
+      name.toLowerCase() === "cf-access-authenticated-user-email"
+        ? "Fol2hk@gmail.com"
+        : null,
+    ),
+    "Fol2hk@gmail.com",
+  );
+  assert.equal(safeNextPath("/home", ""), "/home");
+  assert.equal(safeNextPath("/login", "?x=1"), "/");
+  assert.equal(safeNextPath("//evil.example", ""), "/");
+});
+
+test("proxy prefers Access SSO rewrite before login redirect", () => {
+  const source = readFileSync(path.resolve(process.cwd(), "proxy.ts"), "utf8");
+  assert.match(source, /accessEmailFromHeaders/);
+  assert.match(source, /ACCESS_SSO_PATH/);
+  const ssoIdx = source.indexOf("accessEmailFromHeaders");
+  const loginIdx = source.indexOf("redirectToLogin(req");
+  assert.notEqual(ssoIdx, -1);
+  assert.notEqual(loginIdx, -1);
+  assert.ok(ssoIdx < loginIdx);
 });
 
 test("isAuthExempt does NOT exempt protected app routes", () => {

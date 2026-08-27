@@ -10,9 +10,36 @@ export const LOGIN_PATH = "/login";
 export const COOKIE_NAME = "dt_token";
 export const CODEX_CALLBACK_PATH = "/auth/callback";
 export const CODEX_CALLBACK_API_PATH = "/api/v1/auth/openai-codex/callback";
+export const ACCESS_SSO_PATH = "/api/v1/auth/sso/access";
+export const ACCESS_EMAIL_HEADER = "cf-access-authenticated-user-email";
 
 export function isCodexCallbackPath(pathname: string): boolean {
   return pathname === CODEX_CALLBACK_PATH;
+}
+
+export function isAccessSsoPath(pathname: string): boolean {
+  return pathname === ACCESS_SSO_PATH;
+}
+
+/** Cloudflare Access identity email on the inbound request (edge-injected). */
+export function accessEmailFromHeaders(
+  getHeader: (name: string) => string | null | undefined,
+): string | null {
+  const raw =
+    getHeader(ACCESS_EMAIL_HEADER) ||
+    getHeader("Cf-Access-Authenticated-User-Email");
+  const email = (raw || "").trim();
+  return email || null;
+}
+
+/** Safe same-origin `next` path for post-SSO redirect. */
+export function safeNextPath(pathname: string, search: string): string {
+  const candidate = `${pathname}${search || ""}`;
+  if (!candidate.startsWith("/") || candidate.startsWith("//")) return "/";
+  if (candidate.startsWith(LOGIN_PATH) || candidate.startsWith("/register")) {
+    return "/";
+  }
+  return candidate || "/";
 }
 
 // Paths whose responses come from the backend, not the Next app. The middleware
