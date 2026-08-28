@@ -42,6 +42,7 @@ from deeptutor.services.auth import (
     create_token,
     decode_token,
     delete_user,
+    find_user_by_email,
     get_user_info,
     is_first_user,
     list_users,
@@ -58,6 +59,8 @@ router = APIRouter()
 
 _COOKIE_NAME = "dt_token"
 _COOKIE_MAX_AGE = TOKEN_EXPIRE_HOURS * 3600
+_ACCESS_EMAIL_HEADER = "cf-access-authenticated-user-email"
+_ACCESS_SSO_PATH = "/api/v1/auth/sso/access"
 
 
 def _cookie_attrs() -> dict:
@@ -208,6 +211,73 @@ def _extract_token(authorization: str | None, dt_token: str | None) -> str | Non
     return _bearer_token_from_header(authorization) or dt_token
 
 
+def _access_email_from_headers(headers) -> str | None:
+    """Read Cloudflare Access identity email from request/WebSocket headers."""
+    try:
+        raw = headers.get(_ACCESS_EMAIL_HEADER) or headers.get(
+            "Cf-Access-Authenticated-User-Email"
+        )
+    except Exception:
+        return None
+    if isinstance(raw, (list, tuple)):
+        raw = raw[0] if raw else None
+    email = str(raw or "").strip()
+    return email or None
+
+
+def _access_assertion_present(headers) -> bool:
+    try:
+        raw = headers.get("cf-access-jwt-assertion") or headers.get(
+            "Cf-Access-Jwt-Assertion"
+        )
+    except Exception:
+        return False
+    if isinstance(raw, (list, tuple)):
+        raw = raw[0] if raw else None
+    return bool(str(raw or "").strip())
+
+
+def _payload_from_access_headers(headers) -> TokenPayload | None:
+    """Map Access identity to a local user when Access JWT assertion is present.
+
+    WebSocket upgrades arrive via the same Next → uvicorn path; without a
+    Request.client we cannot apply the loopback fallback, so require the
+    Access assertion header that Cloudflare injects after login.
+    """
+    if not _access_assertion_present(headers):
+        return None
+    email = _access_email_from_headers(headers)
+    if not email:
+        return None
+    return find_user_by_email(email)
+
+
+def _access_sso_trusted(request: Request) -> bool:
+    """Whether this request may use Cloudflare Access identity for SSO.
+
+    Uvicorn trusts ``X-Forwarded-For`` from the Next.js loopback proxy, so
+    ``request.client`` is the browser's public IP on real Access traffic — not
+    a usable loopback signal. Cloudflare injects ``Cf-Access-Jwt-Assertion``
+    only after Access login at the edge; the origin stays loopback-only behind
+    the tunnel, so that assertion is the trust signal.
+
+    Direct loopback / TestClient calls (no assertion) remain allowed for local
+    operators and unit tests.
+    """
+    if _access_assertion_present(request.headers):
+        return True
+    client = request.client
+    host = (client.host if client else "") or ""
+    if host in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        return True
+    # IPv4-mapped IPv6 loopback
+    if host.startswith(":ffff:"):
+        mapped = host.split(":ffff:", 1)[-1]
+        if mapped in {"127.0.0.1", "0.0.0.0"}:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Dependencies — reusable auth guards for other routers
 # ---------------------------------------------------------------------------
@@ -235,8 +305,12 @@ def _install_current_user(payload: TokenPayload | None) -> _CtxToken:
 
 
 async def require_auth(
+    request: Request,
     authorization: str | None = Header(default=None, alias="Authorization"),
     dt_token: str | None = Cookie(default=None, alias=_COOKIE_NAME),
+    access_email: str | None = Header(
+        default=None, alias="Cf-Access-Authenticated-User-Email"
+    ),
 ) -> TokenPayload | None:
     """
     FastAPI dependency that enforces authentication when AUTH_ENABLED=true.
@@ -244,6 +318,7 @@ async def require_auth(
     Accepts the JWT from either:
       - Authorization: Bearer <token> header
       - dt_token cookie
+      - Cloudflare Access identity header (Access JWT assertion or loopback)
 
     ``Header`` and ``Cookie`` are kept here in place of ``HTTPBearer`` so the
     function stays usable from WebSocket call sites that don't go through
@@ -265,23 +340,23 @@ async def require_auth(
         return None
 
     token = _extract_token(authorization, dt_token)
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    if token:
+        payload = decode_token(token)
+        if payload:
+            _install_current_user(payload)
+            return payload
 
-    payload = decode_token(token)
-    if not payload:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    if access_email and _access_sso_trusted(request):
+        payload = find_user_by_email(access_email)
+        if payload:
+            _install_current_user(payload)
+            return payload
 
-    _install_current_user(payload)
-    return payload
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 class _WsAuthFailed:
@@ -317,6 +392,8 @@ async def ws_require_auth(ws: WebSocket) -> _CtxToken | _WsAuthFailed:
 
     token = ws.query_params.get("token") or ws.cookies.get(_COOKIE_NAME)
     payload = decode_token(token) if token else None
+    if not payload:
+        payload = _payload_from_access_headers(ws.headers)
     if not payload:
         await ws.close(code=4001)
         return ws_auth_failed
@@ -401,8 +478,12 @@ async def receive_codex_oauth_callback(
 
 @router.get("/status", response_model=AuthStatusResponse)
 async def auth_status(
+    request: Request,
     authorization: str | None = Header(default=None, alias="Authorization"),
     dt_token: str | None = Cookie(default=None, alias=_COOKIE_NAME),
+    access_email: str | None = Header(
+        default=None, alias="Cf-Access-Authenticated-User-Email"
+    ),
 ) -> AuthStatusResponse:
     """Return whether auth is enabled and whether the current request is authenticated."""
     if not AUTH_ENABLED:
@@ -417,6 +498,8 @@ async def auth_status(
 
     token = _extract_token(authorization, dt_token)
     payload = decode_token(token) if token else None
+    if payload is None and access_email and _access_sso_trusted(request):
+        payload = find_user_by_email(access_email)
     avatar = ""
     if payload is not None:
         info = get_user_info(payload.username)
@@ -431,6 +514,56 @@ async def auth_status(
         is_admin=payload.role == "admin" if payload else False,
         avatar=avatar,
     )
+
+
+@router.get("/sso/access")
+async def sso_cloudflare_access(
+    request: Request,
+    next: str = "/",
+    access_email: str | None = Header(
+        default=None, alias="Cf-Access-Authenticated-User-Email"
+    ),
+):
+    """Exchange a Cloudflare Access identity header for a DeepTutor session cookie.
+
+    Intended for the Next.js auth gate: when Access has authenticated the
+    browser but ``dt_token`` is missing, the middleware rewrites here, we mint
+    a JWT for the matching local account, set the cookie, and redirect to
+    ``next`` (same-origin path only).
+    """
+    from fastapi.responses import RedirectResponse
+
+    if not AUTH_ENABLED:
+        return RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
+
+    if not _access_sso_trusted(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access SSO requires Cloudflare Access assertion or loopback peer",
+        )
+
+    payload = find_user_by_email(access_email or "")
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access identity is not provisioned in DeepTutor",
+        )
+
+    token = create_token(payload.username, payload.role, payload.user_id)
+    target = (
+        next
+        if isinstance(next, str) and next.startswith("/") and not next.startswith("//")
+        else "/"
+    )
+    redirect = RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
+    redirect.set_cookie(value=token, max_age=_COOKIE_MAX_AGE, **_cookie_attrs())
+    logger.info(
+        "Access SSO login for '%s' (role=%r) next=%r",
+        payload.username,
+        payload.role,
+        target,
+    )
+    return redirect
 
 
 @router.post("/login")

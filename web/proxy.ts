@@ -1,13 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseAuthEnabled } from "./lib/api";
 import {
+  ACCESS_SSO_PATH,
   CODEX_CALLBACK_API_PATH,
   COOKIE_NAME,
   LOGIN_PATH,
+  accessEmailFromHeaders,
   classifyToken,
+  isAccessSsoPath,
   isAuthExempt,
   isBackendPath,
   isCodexCallbackPath,
+  safeNextPath,
 } from "./lib/proxy-policy";
 
 // Backend base URL for `/api/*` and `/ws/*` rewrites. The container entrypoint
@@ -39,6 +43,13 @@ function redirectToLogin(
   return response;
 }
 
+function rewriteAccessSso(req: NextRequest): NextResponse {
+  const next = safeNextPath(req.nextUrl.pathname, req.nextUrl.search);
+  const target = new URL(ACCESS_SSO_PATH, API_BASE_URL);
+  target.searchParams.set("next", next);
+  return NextResponse.rewrite(target);
+}
+
 export function proxy(req: NextRequest): NextResponse {
   const { pathname, search } = req.nextUrl;
 
@@ -46,6 +57,11 @@ export function proxy(req: NextRequest): NextResponse {
     return NextResponse.rewrite(
       new URL(CODEX_CALLBACK_API_PATH + search, API_BASE_URL),
     );
+  }
+
+  // Access SSO exchange must reach FastAPI even when the auth gate is on.
+  if (isAccessSsoPath(pathname)) {
+    return NextResponse.rewrite(new URL(pathname + search, API_BASE_URL));
   }
 
   // 1. Bridge the origin gap: forward backend-relative paths to the API server.
@@ -64,11 +80,18 @@ export function proxy(req: NextRequest): NextResponse {
   }
 
   const token = req.cookies.get(COOKIE_NAME)?.value;
-  if (classifyToken(token, Date.now()) !== "valid") {
-    return redirectToLogin(req, { clearCookie: Boolean(token) });
+  if (classifyToken(token, Date.now()) === "valid") {
+    return NextResponse.next();
   }
 
-  return NextResponse.next();
+  // Cloudflare Access already authenticated the browser and injected the
+  // identity email. Exchange it for a DeepTutor session cookie instead of
+  // bouncing to the password login form.
+  if (accessEmailFromHeaders((name) => req.headers.get(name))) {
+    return rewriteAccessSso(req);
+  }
+
+  return redirectToLogin(req, { clearCookie: Boolean(token) });
 }
 
 export const config = {

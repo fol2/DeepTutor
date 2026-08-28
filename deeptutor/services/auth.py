@@ -212,6 +212,33 @@ def get_user_info(username: str) -> dict | None:
     return None
 
 
+def find_user_by_email(email: str) -> TokenPayload | None:
+    """Resolve a Cloudflare Access email to a DeepTutor user (case-insensitive).
+
+    Returns ``None`` when auth is disabled, the email is empty, or no matching
+    (and non-disabled) account exists. Does not create users.
+    """
+    if not AUTH_ENABLED or POCKETBASE_ENABLED:
+        return None
+    needle = (email or "").strip().lower()
+    if not needle or "@" not in needle:
+        return None
+    for username, record in _load_users().items():
+        if str(username).strip().lower() != needle:
+            continue
+        if not isinstance(record, dict) or record.get("disabled"):
+            return None
+        role = str(record.get("role") or "user")
+        if role not in {"admin", "user"}:
+            role = "user"
+        return TokenPayload(
+            username=str(username),
+            role=role,
+            user_id=str(record.get("id") or ""),
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # JWT
 # ---------------------------------------------------------------------------
