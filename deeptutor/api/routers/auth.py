@@ -225,24 +225,57 @@ def _access_email_from_headers(headers) -> str | None:
     return email or None
 
 
+def _access_assertion_present(headers) -> bool:
+    try:
+        raw = headers.get("cf-access-jwt-assertion") or headers.get(
+            "Cf-Access-Jwt-Assertion"
+        )
+    except Exception:
+        return False
+    if isinstance(raw, (list, tuple)):
+        raw = raw[0] if raw else None
+    return bool(str(raw or "").strip())
+
+
 def _payload_from_access_headers(headers) -> TokenPayload | None:
+    """Map Access identity to a local user when Access JWT assertion is present.
+
+    WebSocket upgrades arrive via the same Next → uvicorn path; without a
+    Request.client we cannot apply the loopback fallback, so require the
+    Access assertion header that Cloudflare injects after login.
+    """
+    if not _access_assertion_present(headers):
+        return None
     email = _access_email_from_headers(headers)
     if not email:
         return None
     return find_user_by_email(email)
 
 
-def _client_is_loopback(request: Request) -> bool:
-    """SSO header trust: only accept Access identity from loopback peers.
+def _access_sso_trusted(request: Request) -> bool:
+    """Whether this request may use Cloudflare Access identity for SSO.
 
-    ``tutor.eugnel.com`` reaches DeepTutor via Cloudflare Tunnel → cloudflared
-    → Next.js on ``127.0.0.1``, which rewrites to uvicorn on loopback. LAN or
-    WAN clients never hit the bind address directly.
+    Uvicorn trusts ``X-Forwarded-For`` from the Next.js loopback proxy, so
+    ``request.client`` is the browser's public IP on real Access traffic — not
+    a usable loopback signal. Cloudflare injects ``Cf-Access-Jwt-Assertion``
+    only after Access login at the edge; the origin stays loopback-only behind
+    the tunnel, so that assertion is the trust signal.
+
+    Direct loopback / TestClient calls (no assertion) remain allowed for local
+    operators and unit tests.
     """
+    if _access_assertion_present(request.headers):
+        return True
     client = request.client
     host = (client.host if client else "") or ""
-    # Starlette TestClient reports host ``testclient``.
-    return host in {"127.0.0.1", "::1", "localhost", "testclient"}
+    if host in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        return True
+    # IPv4-mapped IPv6 loopback
+    if host.startswith(":ffff:"):
+        mapped = host.split(":ffff:", 1)[-1]
+        if mapped in {"127.0.0.1", "0.0.0.0"}:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +318,7 @@ async def require_auth(
     Accepts the JWT from either:
       - Authorization: Bearer <token> header
       - dt_token cookie
-      - Cloudflare Access identity header (loopback peers only)
+      - Cloudflare Access identity header (Access JWT assertion or loopback)
 
     ``Header`` and ``Cookie`` are kept here in place of ``HTTPBearer`` so the
     function stays usable from WebSocket call sites that don't go through
@@ -313,7 +346,7 @@ async def require_auth(
             _install_current_user(payload)
             return payload
 
-    if access_email and _client_is_loopback(request):
+    if access_email and _access_sso_trusted(request):
         payload = find_user_by_email(access_email)
         if payload:
             _install_current_user(payload)
@@ -465,7 +498,7 @@ async def auth_status(
 
     token = _extract_token(authorization, dt_token)
     payload = decode_token(token) if token else None
-    if payload is None and access_email and _client_is_loopback(request):
+    if payload is None and access_email and _access_sso_trusted(request):
         payload = find_user_by_email(access_email)
     avatar = ""
     if payload is not None:
@@ -503,10 +536,10 @@ async def sso_cloudflare_access(
     if not AUTH_ENABLED:
         return RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
 
-    if not _client_is_loopback(request):
+    if not _access_sso_trusted(request):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access SSO only accepted from loopback peers",
+            detail="Access SSO requires Cloudflare Access assertion or loopback peer",
         )
 
     payload = find_user_by_email(access_email or "")

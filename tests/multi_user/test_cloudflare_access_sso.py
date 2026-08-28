@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -91,3 +92,23 @@ def test_require_auth_accepts_access_header(auth_app):
     assert body["username"] == "eugeniayyto@gmail.com"
     assert body["role"] == "user"
     assert body["is_admin"] is False
+
+
+def test_access_sso_trusted_by_jwt_assertion_when_peer_is_public():
+    from deeptutor.api.routers.auth import _access_sso_trusted
+
+    request = MagicMock()
+    request.client = MagicMock(host="2a04:204:4e62:5100::1")
+    request.headers = {
+        "Cf-Access-Jwt-Assertion": "eyJhbGciOiJSUzI1NiJ9.fake",
+    }
+    assert _access_sso_trusted(request) is True
+
+
+def test_access_sso_rejects_public_peer_without_assertion():
+    from deeptutor.api.routers.auth import _access_sso_trusted
+
+    request = MagicMock()
+    request.client = MagicMock(host="2a04:204:4e62:5100::1")
+    request.headers = {}
+    assert _access_sso_trusted(request) is False
