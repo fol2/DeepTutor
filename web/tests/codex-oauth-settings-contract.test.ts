@@ -7,6 +7,8 @@ import { createInstance } from "i18next";
 import {
   CODEX_MANAGED_BY,
   isBoundManagedCodexProfile,
+  subscriptionProviderDefaultModel,
+  subscriptionProviderFields,
 } from "../components/settings/codex-profile";
 
 const EDITOR = path.resolve(
@@ -25,12 +27,30 @@ const HELPER = path.resolve(
 const EN = path.resolve(process.cwd(), "locales/en/app.json");
 const ZH = path.resolve(process.cwd(), "locales/zh/app.json");
 
-test("Codex OAuth profile renders the OAuth card from provider metadata", () => {
+test("deployment-owner Codex profile renders the OAuth card from provider metadata", () => {
   const source = readFileSync(EDITOR, "utf8");
 
   assert.match(source, /isCodexOAuthProfile\(/);
   assert.match(source, /<CodexOAuthCard/);
   assert.match(readFileSync(HELPER, "utf8"), /auth_mode === "oauth"/);
+});
+
+test("ordinary-user settings never render the Codex OAuth card", () => {
+  const source = readFileSync(EDITOR, "utf8");
+  const ordinaryBranchStart = source.indexOf("if (!catalogEditable)");
+  const ownerEditorStart = source.indexOf(
+    "return (\n    <div data-tour={`tour-${service}`}",
+    ordinaryBranchStart,
+  );
+
+  assert.notEqual(ordinaryBranchStart, -1);
+  assert.notEqual(ownerEditorStart, -1);
+  assert.equal(
+    source
+      .slice(ordinaryBranchStart, ownerEditorStart)
+      .includes("<CodexOAuthCard"),
+    false,
+  );
 });
 
 test("the Codex profile predicates live in one place", () => {
@@ -62,6 +82,39 @@ test("managed Codex reasoning controls require a current account binding", () =>
   assert.match(editor, /isBoundManagedCodexProfile\(activeProfile\)/);
 });
 
+test("subscription providers expose only the connection fields they consume", () => {
+  assert.deepEqual(subscriptionProviderFields("llm", "cursor_subscription"), {
+    apiKey: true,
+    baseUrl: false,
+    baseUrlRequired: false,
+  });
+  assert.deepEqual(subscriptionProviderFields("llm", "grok_subscription"), {
+    apiKey: false,
+    baseUrl: false,
+    baseUrlRequired: false,
+  });
+  assert.equal(
+    subscriptionProviderFields("embedding", "cursor_subscription"),
+    null,
+  );
+});
+
+test("subscription providers select their exact owner-bound model", () => {
+  assert.deepEqual(subscriptionProviderDefaultModel("cursor_subscription"), {
+    name: "Grok 4.6 High (Cursor Ultra)",
+    model: "cursor-grok-4.6-high",
+  });
+  assert.deepEqual(subscriptionProviderDefaultModel("grok_subscription"), {
+    name: "Grok 4.6 High (SuperGrok)",
+    model: "grok-4.6-high",
+  });
+  assert.equal(subscriptionProviderDefaultModel("openai"), null);
+
+  const editor = readFileSync(EDITOR, "utf8");
+  assert.match(editor, /subscriptionProviderDefaultModel\(/);
+  assert.match(editor, /updateProfileField\(service, "api_key", ""\)/);
+});
+
 test("managed Codex profiles expose only provider-supported reasoning effort", () => {
   const source = readFileSync(EDITOR, "utf8");
 
@@ -72,12 +125,11 @@ test("managed Codex profiles expose only provider-supported reasoning effort", (
   assert.match(source, /!isCodexOAuth \|\| isBoundManagedCodex/);
 });
 
-test("ordinary users can edit only their owner-scoped Codex reasoning overrides", () => {
+test("the deployment-owner Codex card exposes supported reasoning overrides", () => {
   const card = readFileSync(CARD, "utf8");
   const client = readFileSync(CLIENT, "utf8");
 
   assert.match(client, /models: CodexReasoningModel\[\]/);
-  assert.match(card, /catalogEditable === false/);
   assert.match(card, /status\.models\.map\(\(model\)/);
   assert.match(
     card,

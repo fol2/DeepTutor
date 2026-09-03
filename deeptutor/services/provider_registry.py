@@ -30,7 +30,8 @@ class ProviderSpec:
     display_name: str = ""
 
     # Which provider implementation to use:
-    # "openai_compat" | "anthropic" | "azure_openai" | "openai_codex" | "github_copilot" | "codebuddy"
+    # "openai_compat" | "anthropic" | "azure_openai" | "openai_codex" |
+    # "cursor_sdk" | "grok_subscription" | "github_copilot" | "codebuddy"
     backend: str = "openai_compat"
 
     env_extras: tuple[tuple[str, str], ...] = ()
@@ -58,6 +59,9 @@ class ProviderSpec:
     # Exact matching is intentional: providers often expose Responses only on
     # one model even when sibling models share the same family prefix.
     native_web_search_models: tuple[str, ...] = ()
+    # Native SDK/CLI adapters do not necessarily expose a configurable HTTP
+    # endpoint.  OpenAI-compatible providers keep the default requirement.
+    requires_api_base: bool = True
 
     @property
     def mode(self) -> str:
@@ -97,6 +101,8 @@ PROVIDER_ALIASES = {
     "byteplusCodingPlan": "byteplus_coding_plan",
     "github-copilot": "github_copilot",
     "openai-codex": "openai_codex",
+    "cursor-subscription": "cursor_subscription",
+    "grok-subscription": "grok_subscription",
     "codebuddy-code": "codebuddy",
     "codebuddy_code": "codebuddy",
     "workbuddy": "codebuddy",
@@ -299,6 +305,24 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_codex",
         is_oauth=True,
         default_api_base="https://chatgpt.com/backend-api",
+    ),
+    ProviderSpec(
+        name="cursor_subscription",
+        keywords=("cursor-grok",),
+        env_key="CURSOR_API_KEY",
+        display_name="Cursor Ultra",
+        backend="cursor_sdk",
+        is_direct=True,
+        requires_api_base=False,
+    ),
+    ProviderSpec(
+        name="grok_subscription",
+        keywords=("grok-4.6",),
+        env_key="",
+        display_name="SuperGrok Heavy",
+        backend="grok_subscription",
+        is_oauth=True,
+        requires_api_base=False,
     ),
     ProviderSpec(
         name="github_copilot",

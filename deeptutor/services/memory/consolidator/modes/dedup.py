@@ -18,7 +18,6 @@ Dedup is invoked either:
 from __future__ import annotations
 
 from dataclasses import dataclass
-import logging
 
 from deeptutor.services.memory import paths
 from deeptutor.services.memory.consolidator.line_doc import (
@@ -36,8 +35,6 @@ from deeptutor.services.memory.consolidator.modes._runtime import (
     write_doc_checkpoint,
 )
 from deeptutor.services.memory.settings import load_memory_settings
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -69,13 +66,8 @@ async def run_dedup(
 
     token = None
     if llm_selection:
-        try:
-            _config, token = activate_llm_selection(llm_selection)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "memory dedup: ignoring unresolvable llm_selection %s: %s", llm_selection, exc
-            )
-            token = None
+        # Do not replace a revoked queued selection with the global model.
+        _config, token = activate_llm_selection(llm_selection)
     try:
         return await _run_dedup_inner(
             layer, key, iters=iters, language=language, user_label=user_label, on_event=on_event

@@ -278,6 +278,12 @@ class PartnerRunner:
         becomes the reply (the final outbound is then marked ``_streamed``
         so the channel doesn't send it twice).
         """
+        from deeptutor.multi_user.context import resolve_current_user_by_id
+        from deeptutor.multi_user.model_access import (
+            DEPLOYMENT_OWNER_ID_FIELD,
+            admin_catalog,
+        )
+        from deeptutor.multi_user.paths import local_admin_user
         from deeptutor.runtime.orchestrator import ChatOrchestrator
         from deeptutor.services.model_selection.runtime import (
             activate_llm_selection,
@@ -305,9 +311,10 @@ class PartnerRunner:
         # actual reason ("No active LLM model is configured…") and lets
         # _run_turn fall back to the backup selection.
         #
-        # activate_llm_selection still runs BEFORE the partner scope is entered:
-        # the model catalog lives in the admin workspace, and the scoped config
-        # rides the same async context into the orchestrator task.
+        # Model authority and workspace identity are deliberately independent.
+        # The saved human owner authorises the model; the synthetic Partner user
+        # below continues to own RAG/skills/notebooks. This also makes auto-start
+        # independent of whichever account (or no request) started the process.
         llm_token = None
         try:
             context = self._build_context(msg, store=store)
@@ -321,7 +328,26 @@ class PartnerRunner:
             # they happen, so with progress muted we keep buffered delivery.
             wants_stream = is_im and send_progress and bool(msg.metadata.get("_wants_stream"))
 
-            _config, llm_token = activate_llm_selection(selection)
+            owner_id = str(getattr(self.config, "owner_id", "") or "")
+            owner = None
+            if owner_id:
+                owner = await resolve_current_user_by_id(owner_id)
+            else:
+                # Old admin-managed Partners have no stored owner. Prefer the
+                # durable subscription owner; an explicit ambient admin is only
+                # accepted while the catalogue is still unclaimed.
+                catalog = admin_catalog()
+                durable_owner_id = str(catalog.get(DEPLOYMENT_OWNER_ID_FIELD) or "")
+                if durable_owner_id:
+                    owner = await resolve_current_user_by_id(durable_owner_id)
+                else:
+                    # No recorded owner means a legacy deployment-managed
+                    # Partner, never "whoever happened to send this message".
+                    owner = local_admin_user()
+            if owner is None:
+                raise PermissionError("Partner owner account is unavailable.")
+            with user_context(owner):
+                _config, llm_token = activate_llm_selection(selection)
             # RAG / skills / notebooks resolve to the Partner's shared synthetic
             # workspace. Partner-only memory tools additionally read the turn
             # context below: assigned users get a private relationship-memory

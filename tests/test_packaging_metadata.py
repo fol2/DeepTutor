@@ -90,6 +90,7 @@ def test_pageindex_sdk_range_matches_every_install_surface() -> None:
         "pyte>=0.8.1",
         "pdfplumber>=0.11.0,<0.11.8",
         "reportlab>=4.0.0",
+        "cursor-sdk>=1.0.30,<1.1",
     ],
 )
 def test_cli_runtime_dependencies_match_every_install_surface(expected: str) -> None:

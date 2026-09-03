@@ -12,7 +12,9 @@ if TYPE_CHECKING:
     from .azure_openai_provider import AzureOpenAIProvider
     from .codebuddy_http_provider import CodeBuddyHTTPProvider
     from .codebuddy_provider import CodeBuddyProvider
+    from .cursor_sdk_provider import CursorSDKProvider
     from .github_copilot_provider import GitHubCopilotProvider
+    from .grok_subscription_provider import GrokSubscriptionProvider
     from .openai_codex_provider import OpenAICodexProvider
     from .openai_compat_provider import OpenAICompatProvider
 
@@ -21,8 +23,10 @@ __all__ = [
     "AzureOpenAIProvider",
     "CodeBuddyHTTPProvider",
     "CodeBuddyProvider",
+    "CursorSDKProvider",
     "GenerationSettings",
     "GitHubCopilotProvider",
+    "GrokSubscriptionProvider",
     "LLMProvider",
     "LLMResponse",
     "OpenAICodexProvider",
@@ -36,7 +40,9 @@ _LAZY_TYPES = {
     "AzureOpenAIProvider": ("azure_openai_provider", "AzureOpenAIProvider"),
     "CodeBuddyHTTPProvider": ("codebuddy_http_provider", "CodeBuddyHTTPProvider"),
     "CodeBuddyProvider": ("codebuddy_provider", "CodeBuddyProvider"),
+    "CursorSDKProvider": ("cursor_sdk_provider", "CursorSDKProvider"),
     "GitHubCopilotProvider": ("github_copilot_provider", "GitHubCopilotProvider"),
+    "GrokSubscriptionProvider": ("grok_subscription_provider", "GrokSubscriptionProvider"),
     "OpenAICodexProvider": ("openai_codex_provider", "OpenAICodexProvider"),
     "OpenAICompatProvider": ("openai_compat_provider", "OpenAICompatProvider"),
 }

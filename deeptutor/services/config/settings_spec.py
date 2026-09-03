@@ -334,6 +334,16 @@ def _read_catalog_model(service_name: str) -> Callable[[], str]:
     def _read() -> str:
         service = _catalog_service()
         catalog = service.load()
+        if service_name == "llm":
+            from deeptutor.multi_user.model_access import allowed_llm_options
+
+            active = allowed_llm_options(catalog).get("active")
+            if not isinstance(active, dict):
+                return ""
+            return _compose(
+                str(active.get("profile_id") or ""),
+                str(active.get("model_id") or ""),
+            )
         profile = service.get_active_profile(catalog, service_name)
         model = service.get_active_model(catalog, service_name)
         if not profile:
@@ -348,6 +358,30 @@ def _catalog_model_choices(service_name: str) -> Callable[[], tuple[SettingChoic
         service = _catalog_service()
         catalog = service.load()
         active = _read_catalog_model(service_name)()
+        if service_name == "llm":
+            from deeptutor.multi_user.model_access import allowed_llm_options
+
+            access = allowed_llm_options(catalog)
+            return tuple(
+                SettingChoice(
+                    value=_compose(
+                        str(option.get("profile_id") or ""),
+                        str(option.get("model_id") or ""),
+                    ),
+                    label=(
+                        f"{option.get('model_name') or option.get('label') or option.get('model_id')}"
+                        f" · {option.get('profile_name') or option.get('profile_id')}"
+                    ),
+                    description=(f"Served by {option.get('provider') or 'an assigned endpoint'}."),
+                    current=_compose(
+                        str(option.get("profile_id") or ""),
+                        str(option.get("model_id") or ""),
+                    )
+                    == active,
+                )
+                for option in access.get("options", [])
+                if isinstance(option, dict)
+            )
         out: list[SettingChoice] = []
         for profile in catalog.get("services", {}).get(service_name, {}).get("profiles", []) or []:
             profile_id = str(profile.get("id") or "")
@@ -373,6 +407,10 @@ def _catalog_model_choices(service_name: str) -> Callable[[], tuple[SettingChoic
 def _write_catalog_model(service_name: str) -> Callable[[str], None]:
     def _write(value: str) -> None:
         profile_id, model_id = _decompose(value)
+        if service_name == "llm":
+            from deeptutor.multi_user.model_access import apply_allowed_llm_selection
+
+            apply_allowed_llm_selection({"profile_id": profile_id, "model_id": model_id})
 
         def _mutate(catalog: dict[str, Any]) -> None:
             service = catalog.setdefault("services", {}).setdefault(service_name, {})

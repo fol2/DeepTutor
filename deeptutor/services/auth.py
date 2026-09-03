@@ -295,14 +295,24 @@ def decode_token(token: str) -> TokenPayload | None:
 
     try:
         payload = jwt.decode(token, AUTH_SECRET, algorithms=[_ALGORITHM])
-        username = payload.get("sub")
+        username = str(payload.get("sub") or "")
         if not username:
             return None
-        user_id = str(payload.get("uid") or "")
-        if not user_id:
-            record = _load_users().get(str(username)) or {}
-            user_id = str(record.get("id") or "")
-        return TokenPayload(username=username, role=payload.get("role", "user"), user_id=user_id)
+        record = _load_users().get(username)
+        if not isinstance(record, dict) or record.get("disabled"):
+            return None
+        current_user_id = str(record.get("id") or "")
+        token_user_id = str(payload.get("uid") or "")
+        if token_user_id and current_user_id and token_user_id != current_user_id:
+            return None
+        role = str(record.get("role") or "user")
+        if role not in {"admin", "user"}:
+            role = "user"
+        return TokenPayload(
+            username=username,
+            role=role,
+            user_id=current_user_id or token_user_id,
+        )
     except JWTError:
         return None
 

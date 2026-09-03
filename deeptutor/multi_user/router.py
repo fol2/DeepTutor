@@ -16,10 +16,17 @@ from deeptutor.services.skill.service import SkillService
 from .audit import log_admin_action
 from .book_permission import BookDefaultLevel, BookPermission, BookPermissionLevel
 from .context import get_current_user
-from .grants import load_grant, save_grant
+from .grants import load_grant, update_grant
 from .identity import get_user_by_id, list_user_info, set_book_permission
 from .knowledge_access import admin_kb_base_dir
-from .model_access import is_owner_bound
+from .model_access import (
+    admin_visible_grant,
+    is_deployment_owner,
+    is_grantable_subscription_model,
+    is_grantable_subscription_profile,
+    is_owner_bound,
+    prepare_assignable_model_grants,
+)
 from .paths import get_admin_path_service
 
 router = APIRouter()
@@ -46,18 +53,28 @@ def _admin_catalog_summary() -> dict[str, list[dict[str, Any]]]:
     catalog = ModelCatalogService(
         path=get_admin_path_service().get_settings_file("model_catalog")
     ).load()
+    actor_is_owner = is_deployment_owner(catalog=catalog)
     out: dict[str, list[dict[str, Any]]] = {"llm": []}
     for service, state in (catalog.get("services") or {}).items():
         if service not in out:
             continue
         for profile in state.get("profiles", []) or []:
-            if is_owner_bound(profile):
-                # Bound to one person's OAuth identity, so it is not assignable.
-                # Listing it here would offer admins a grant the server drops.
+            if is_owner_bound(profile) and not (
+                actor_is_owner and is_grantable_subscription_profile(profile, catalog)
+            ):
+                # Credential metadata stays private to the deployment owner.
+                # Only the three fixed tutoring subscription bindings are
+                # assignable, and the summary below contains logical ids only.
                 continue
             profile_id = str(profile.get("id") or "")
             models = []
             for model in profile.get("models", []) or []:
+                if is_owner_bound(profile) and not is_grantable_subscription_model(
+                    profile,
+                    model,
+                    catalog,
+                ):
+                    continue
                 models.append(
                     {
                         "model_id": model.get("id", ""),
@@ -65,6 +82,8 @@ def _admin_catalog_summary() -> dict[str, list[dict[str, Any]]]:
                         "model": model.get("model", ""),
                     }
                 )
+            if is_owner_bound(profile) and not models:
+                continue
             out[service].append(
                 {
                     "profile_id": profile_id,
@@ -157,7 +176,7 @@ async def admin_books(_: object = Depends(require_admin)) -> dict[str, Any]:
 @router.get("/users/{user_id}/grants")
 async def get_user_grants(user_id: str, _: object = Depends(require_admin)) -> dict[str, Any]:
     _require_assignable_user(user_id)
-    return {"grant": load_grant(user_id)}
+    return {"grant": admin_visible_grant(load_grant(user_id))}
 
 
 @router.put("/users/{user_id}/grants")
@@ -168,7 +187,12 @@ async def put_user_grants(
 ) -> dict[str, Any]:
     _require_assignable_user(user_id)
     try:
-        grant = save_grant(user_id, payload.grant)
+        grant = update_grant(
+            user_id,
+            lambda existing: prepare_assignable_model_grants(payload.grant, existing=existing),
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     log_admin_action(
@@ -186,7 +210,7 @@ async def put_user_grants(
             "exec_enabled": grant.get("exec_enabled"),
         },
     )
-    return {"grant": grant}
+    return {"grant": admin_visible_grant(grant)}
 
 
 @router.get("/users/{user_id}/book-permission")

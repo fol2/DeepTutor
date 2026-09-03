@@ -101,13 +101,10 @@ async def run_update(
     settings = load_memory_settings()
     token = None
     if llm_selection:
-        try:
-            _config, token = activate_llm_selection(llm_selection)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "memory update: ignoring unresolvable llm_selection %s: %s", llm_selection, exc
-            )
-            token = None
+        # A queued run retains only logical ids.  Revalidation at execution
+        # must fail the run after a grant is revoked; falling through to the
+        # deployment-wide active model would spend the wrong subscription.
+        _config, token = activate_llm_selection(llm_selection)
     try:
         if layer == "L2":
             return await _run_update_l2(

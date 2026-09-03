@@ -38,6 +38,63 @@ def _msg(content: str = "hello", channel: str = "telegram") -> InboundMessage:
 
 class TestTurnExecution:
     @pytest.mark.asyncio
+    async def test_model_authority_is_owner_while_workspace_is_partner(
+        self, partners_root, fake_orchestrator, monkeypatch
+    ):
+        from deeptutor.multi_user import context as user_context_module
+        from deeptutor.multi_user.models import CurrentUser
+        from deeptutor.multi_user.paths import scope_for_user
+
+        owner = CurrentUser(
+            "u_owner",
+            "owner",
+            "user",
+            scope_for_user("u_owner", is_admin=False),
+        )
+
+        async def resolve(user_id: str):
+            assert user_id == owner.id
+            return owner
+
+        monkeypatch.setattr(user_context_module, "resolve_current_user_by_id", resolve)
+        fake_orchestrator.script = finish("ok")
+        runner = _runner(
+            partners_root,
+            PartnerConfig(
+                name="Ada",
+                owner_id=owner.id,
+                llm_selection={"profile_id": "owner-profile", "model_id": "owner-model"},
+            ),
+        )
+
+        assert await runner.process_message(_msg()) == "ok"
+        assert fake_orchestrator.activation_users == [owner.id]
+        assert fake_orchestrator.runtime_users == ["partner_ada"]
+
+    @pytest.mark.asyncio
+    async def test_missing_partner_owner_fails_before_model_activation(
+        self, partners_root, fake_orchestrator, monkeypatch
+    ):
+        from deeptutor.multi_user import context as user_context_module
+
+        async def missing(_user_id: str):
+            return None
+
+        monkeypatch.setattr(user_context_module, "resolve_current_user_by_id", missing)
+        runner = _runner(
+            partners_root,
+            PartnerConfig(
+                name="Ada",
+                owner_id="deleted-owner",
+                llm_selection={"profile_id": "p", "model_id": "m"},
+            ),
+        )
+
+        result = await runner.process_message(_msg())
+        assert "Partner owner account is unavailable" in result
+        assert fake_orchestrator.activated_selections == []
+
+    @pytest.mark.asyncio
     async def test_returns_finish_text_and_persists_session(self, partners_root, fake_orchestrator):
         fake_orchestrator.script = narration_round("c1", "let me check") + finish(
             "The answer is 4."

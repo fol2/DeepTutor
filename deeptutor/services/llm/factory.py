@@ -200,6 +200,8 @@ def _resolve_call_config(
             binding=provider_name,
             provider_name=provider_name,
             provider_mode=provider_mode,
+            profile_id=current.profile_id if current is not None else None,
+            model_id=current.model_id if current is not None else None,
             api_version=api_version,
             extra_headers=merged_headers,
             reasoning_effort=resolved_reasoning_effort,
@@ -227,6 +229,13 @@ def _resolve_call_config(
     provider_name = provider_spec.name if provider_spec is not None else current.provider_name
     provider_mode = provider_spec.mode if provider_spec is not None else current.provider_mode
     resolved_binding = provider_name or binding_hint or current.binding or "openai"
+    preserves_logical_model = (
+        resolved_model == current.model
+        and resolved_api_key == current.api_key
+        and _url_matches_current(resolved_base_url, current)
+        and resolved_api_version == current.api_version
+        and _binding_matches_current(resolved_binding, current)
+    )
 
     config = current.model_copy(
         update={
@@ -237,6 +246,8 @@ def _resolve_call_config(
             "binding": resolved_binding,
             "provider_name": provider_name or resolved_binding,
             "provider_mode": provider_mode,
+            "profile_id": current.profile_id if preserves_logical_model else None,
+            "model_id": current.model_id if preserves_logical_model else None,
             "api_version": resolved_api_version,
             "extra_headers": merged_headers,
             "reasoning_effort": (

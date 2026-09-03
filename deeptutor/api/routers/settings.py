@@ -8,6 +8,7 @@ UI preferences, configuration catalog management, and detailed streamed tests.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import json
 import logging
 import time
@@ -20,7 +21,13 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 from deeptutor.multi_user.context import get_current_user
-from deeptutor.multi_user.model_access import allowed_llm_options
+from deeptutor.multi_user.model_access import (
+    DEPLOYMENT_OWNER_ID_FIELD,
+    allowed_llm_options,
+    is_deployment_owner,
+    is_deployment_owner_binding,
+    require_deployment_owner_binding,
+)
 from deeptutor.services.codebuddy_auth import get_codebuddy_auth_service
 from deeptutor.services.codex_auth import (
     CodexAuthError,
@@ -45,8 +52,8 @@ from deeptutor.services.config.runtime_settings import (
 from deeptutor.services.embedding.client import reset_embedding_client
 from deeptutor.services.llm.client import reset_llm_client
 from deeptutor.services.llm.config import clear_llm_config_cache
-from deeptutor.services.model_selection import list_llm_options
 from deeptutor.services.path_service import get_path_service
+from deeptutor.services.provider_registry import canonical_provider_name
 from deeptutor.services.settings.interface_settings import (
     DEFAULT_UI_SETTINGS as INTERFACE_DEFAULTS,
 )
@@ -69,6 +76,11 @@ router = APIRouter()
 public_router = APIRouter()
 
 TOUR_CACHE = None
+
+_FIXED_SUBSCRIPTION_MODELS = {
+    "cursor_subscription": "cursor-grok-4.6-high",
+    "grok_subscription": "grok-4.6-high",
+}
 
 
 def _settings_file():
@@ -411,28 +423,212 @@ def _require_settings_admin() -> None:
         )
 
 
-def _require_codex_oauth_actor() -> None:
-    """Gate the Codex OAuth lifecycle: personal, not administrative.
+def _deployment_owner_http_error(exc: PermissionError) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
 
-    Every one of these endpoints acts on the *caller's own* credentials —
-    ``get_codex_oauth_service()`` resolves the store, the model catalog, and
-    the callback route from owner scope — so requiring an administrator was
-    what left ordinary users unable to use Codex at all: an owner-bound
-    profile is (correctly) never grantable, and they could not sign in for
-    themselves either (#781).
 
-    A partner is refused: it is a synthetic user whose owner is a real
-    account, so letting one in would mean acting on that person's login —
-    including signing them out. Partners inherit the owner's login at call
-    time and need no lifecycle of their own.
+def _profile_binding(profile: dict[str, Any]) -> Any:
+    return profile.get("binding") or profile.get("provider")
+
+
+def _llm_profiles(catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    profiles = catalog.get("services", {}).get("llm", {}).get("profiles", [])
+    if not isinstance(profiles, list):
+        return []
+    return [profile for profile in profiles if isinstance(profile, dict)]
+
+
+def _protected_profile_ids(catalog: dict[str, Any]) -> set[str]:
+    return {
+        str(profile.get("id") or "")
+        for profile in _llm_profiles(catalog)
+        if is_deployment_owner_binding(_profile_binding(profile))
+    }
+
+
+def _validate_fixed_subscription_models(catalog: dict[str, Any]) -> None:
+    """Reject catalogue states that the fixed subscription adapters cannot run."""
+    llm = catalog.get("services", {}).get("llm", {})
+    active_profile_id = str(llm.get("active_profile_id") or "")
+    active_model_id = str(llm.get("active_model_id") or "")
+    for profile in _llm_profiles(catalog):
+        binding = canonical_provider_name(str(_profile_binding(profile) or ""))
+        expected_model = _FIXED_SUBSCRIPTION_MODELS.get(str(binding or ""))
+        if expected_model is None:
+            continue
+        models = profile.get("models")
+        if not isinstance(models, list) or len(models) != 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{binding} requires its single fixed model {expected_model}.",
+            )
+        model = models[0]
+        if not isinstance(model, dict) or str(model.get("model") or "") != expected_model:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{binding} requires its single fixed model {expected_model}.",
+            )
+        if (
+            str(profile.get("id") or "") == active_profile_id
+            and str(model.get("id") or "") != active_model_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{binding} requires its fixed model to be active.",
+            )
+
+
+def _require_deployment_owner_provider(binding: Any) -> None:
+    try:
+        require_deployment_owner_binding(str(binding or ""))
+    except PermissionError as exc:
+        raise _deployment_owner_http_error(exc) from None
+
+
+def _active_llm_profile(catalog: dict[str, Any]) -> dict[str, Any] | None:
+    llm = catalog.get("services", {}).get("llm", {})
+    active_profile_id = llm.get("active_profile_id")
+    profiles = _llm_profiles(catalog)
+    for profile in profiles:
+        if profile.get("id") == active_profile_id:
+            return profile
+    return profiles[0] if profiles else None
+
+
+def _require_active_llm_owner(catalog: dict[str, Any]) -> None:
+    profile = _active_llm_profile(catalog)
+    if profile is not None:
+        _require_deployment_owner_provider(_profile_binding(profile))
+
+
+def _catalog_for_actor(catalog: dict[str, Any]) -> dict[str, Any]:
+    """Hide deployment-owner subscription profiles from every other admin."""
+    if is_deployment_owner(catalog=catalog):
+        return deepcopy(catalog)
+    visible = deepcopy(catalog)
+    visible.pop(DEPLOYMENT_OWNER_ID_FIELD, None)
+    hidden_ids = _protected_profile_ids(visible)
+    llm = visible.get("services", {}).get("llm", {})
+    if isinstance(llm, dict):
+        llm["profiles"] = [
+            profile
+            for profile in _llm_profiles(visible)
+            if str(profile.get("id") or "") not in hidden_ids
+        ]
+        if str(llm.get("active_profile_id") or "") in hidden_ids:
+            llm["active_profile_id"] = None
+            llm["active_model_id"] = None
+    return visible
+
+
+def _provider_choices_for_actor(catalog: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    choices = _provider_choices()
+    if is_deployment_owner(catalog=catalog):
+        return choices
+    choices["llm"] = [
+        item for item in choices["llm"] if not is_deployment_owner_binding(item.get("value"))
+    ]
+    return choices
+
+
+def _prepare_catalog_write(
+    current: dict[str, Any],
+    proposed: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind or preserve deployment-global subscription ownership.
+
+    Later administrators receive a catalog with the protected profiles removed.
+    Their round-trip therefore has to merge the stored profiles back verbatim;
+    accepting a same-id replacement could restore the owner's masked key into
+    an attacker-controlled provider URL.
     """
-    from deeptutor.services.partners.scope import is_partner_user_id
+    result = deepcopy(proposed)
+    current_owner_id = str(current.get(DEPLOYMENT_OWNER_ID_FIELD) or "")
+    current_protected = [
+        deepcopy(profile)
+        for profile in _llm_profiles(current)
+        if is_deployment_owner_binding(_profile_binding(profile))
+    ]
+    current_protected_ids = {str(profile.get("id") or "") for profile in current_protected}
 
-    if is_partner_user_id(get_current_user().id):
+    services = result.setdefault("services", {})
+    if not isinstance(services, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Catalog services must be an object.",
+        )
+    llm = services.setdefault("llm", {})
+    if not isinstance(llm, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="LLM catalog must be an object.",
+        )
+    profiles = llm.setdefault("profiles", [])
+    if not isinstance(profiles, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="LLM profiles must be a list.",
+        )
+
+    _validate_fixed_subscription_models(result)
+
+    if is_deployment_owner(catalog=current):
+        if current_owner_id:
+            result[DEPLOYMENT_OWNER_ID_FIELD] = current_owner_id
+        elif any(
+            isinstance(profile, dict) and is_deployment_owner_binding(_profile_binding(profile))
+            for profile in profiles
+        ):
+            result[DEPLOYMENT_OWNER_ID_FIELD] = get_current_user().id
+        else:
+            result.pop(DEPLOYMENT_OWNER_ID_FIELD, None)
+        return result
+
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        profile_id = str(profile.get("id") or "")
+        if profile_id in current_protected_ids or is_deployment_owner_binding(
+            _profile_binding(profile)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Subscription profiles are managed by the deployment owner.",
+            )
+
+    requested_active = str(llm.get("active_profile_id") or "")
+    if requested_active in current_protected_ids:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="A partner uses the Codex login of the account that owns it.",
+            detail="Subscription profiles are managed by the deployment owner.",
         )
+    current_llm = current.get("services", {}).get("llm", {})
+    current_active = str(current_llm.get("active_profile_id") or "")
+    if current_active in current_protected_ids and not requested_active:
+        llm["active_profile_id"] = current_llm.get("active_profile_id")
+        llm["active_model_id"] = current_llm.get("active_model_id")
+    llm["profiles"] = [*profiles, *current_protected]
+    if current_owner_id:
+        result[DEPLOYMENT_OWNER_ID_FIELD] = current_owner_id
+    else:
+        result.pop(DEPLOYMENT_OWNER_ID_FIELD, None)
+    return result
+
+
+def _replace_catalog_from_payload(current: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Prepare one API catalogue payload inside the service update lock."""
+    restored = restore_catalog_secrets(payload, current)
+    proposed = _prepare_catalog_write(
+        current,
+        reconcile_codex_catalog_update(current, restored),
+    )
+    current.clear()
+    current.update(proposed)
+
+
+def _require_codex_oauth_actor() -> None:
+    """Reserve the legacy Codex OAuth lifecycle for the deployment owner."""
+    _require_deployment_owner_provider("openai_codex")
 
 
 def _codex_http_exception(error: CodexAuthError) -> HTTPException:
@@ -639,10 +835,11 @@ async def get_settings():
         # Non-admins never see the catalog (provider URLs/keys); their model
         # choices come from /settings/llm-options (grant-filtered).
         return {"ui": load_ui_settings()}
+    catalog = get_model_catalog_service().load()
     return {
         "ui": load_ui_settings(),
-        "catalog": redact_catalog_secrets(get_model_catalog_service().load()),
-        "providers": _provider_choices(),
+        "catalog": redact_catalog_secrets(_catalog_for_actor(catalog)),
+        "providers": _provider_choices_for_actor(catalog),
     }
 
 
@@ -694,24 +891,28 @@ async def refresh_openai_codex_models() -> dict[str, Any]:
 @router.get("/providers/codebuddy/auth/status")
 async def get_codebuddy_auth_status() -> dict[str, Any]:
     _require_settings_admin()
+    _require_deployment_owner_provider("codebuddy")
     return await get_codebuddy_auth_service().status()
 
 
 @router.post("/providers/codebuddy/auth/start")
 async def start_codebuddy_auth() -> dict[str, Any]:
     _require_settings_admin()
+    _require_deployment_owner_provider("codebuddy")
     return await get_codebuddy_auth_service().start_login()
 
 
 @router.post("/providers/codebuddy/auth/cancel")
 async def cancel_codebuddy_auth() -> dict[str, Any]:
     _require_settings_admin()
+    _require_deployment_owner_provider("codebuddy")
     return await get_codebuddy_auth_service().cancel_login()
 
 
 @router.post("/providers/codebuddy/auth/logout")
 async def logout_codebuddy_auth() -> dict[str, Any]:
     _require_settings_admin()
+    _require_deployment_owner_provider("codebuddy")
     return await get_codebuddy_auth_service().logout()
 
 
@@ -737,7 +938,8 @@ async def update_openai_codex_reasoning_effort(
 @router.get("/catalog")
 async def get_catalog():
     _require_settings_admin()
-    return {"catalog": redact_catalog_secrets(get_model_catalog_service().load())}
+    catalog = get_model_catalog_service().load()
+    return {"catalog": redact_catalog_secrets(_catalog_for_actor(catalog))}
 
 
 @router.get("/network")
@@ -1264,41 +1466,43 @@ async def test_mineru_connection(payload: MinerUSettingsUpdate):
 
 @router.get("/llm-options")
 async def get_llm_options():
-    if not get_current_user().is_admin:
-        return allowed_llm_options()
-    return list_llm_options(get_model_catalog_service().load())
+    user = get_current_user()
+    catalog = get_model_catalog_service().load() if user.is_admin else None
+    return allowed_llm_options(catalog)
 
 
 @router.put("/catalog")
 async def update_catalog(payload: CatalogPayload):
     _require_settings_admin()
     service = get_model_catalog_service()
-    current = service.load()
-    restored = restore_catalog_secrets(payload.catalog, current)
-    proposed = reconcile_codex_catalog_update(current, restored)
-    catalog = service.save(proposed)
+
+    # Keep the first external-identity subscription claim inside the catalogue
+    # service's read-modify-write lock. Once this saves the durable owner id, a
+    # concurrent later administrator observes it and is rejected.
+    catalog = service.update(
+        lambda current: _replace_catalog_from_payload(current, payload.catalog)
+    )
     _invalidate_runtime_caches()
-    return {"catalog": redact_catalog_secrets(catalog)}
+    return {"catalog": redact_catalog_secrets(_catalog_for_actor(catalog))}
 
 
 @router.post("/apply")
 async def apply_catalog(payload: CatalogPayload | None = None):
     _require_settings_admin()
     service = get_model_catalog_service()
-    current = service.load()
-    catalog = (
-        reconcile_codex_catalog_update(
-            current,
-            restore_catalog_secrets(payload.catalog, current),
+    if payload is None:
+        current = service.load()
+        catalog = _prepare_catalog_write(current, current)
+    else:
+        catalog = service.update(
+            lambda current: _replace_catalog_from_payload(current, payload.catalog)
         )
-        if payload is not None
-        else current
-    )
+    _require_active_llm_owner(catalog)
     applied = service.apply(catalog)
     _invalidate_runtime_caches()
     return {
         "message": "Catalog applied to runtime settings.",
-        "catalog": redact_catalog_secrets(service.load()),
+        "catalog": redact_catalog_secrets(_catalog_for_actor(service.load())),
         "runtime": applied,
     }
 
@@ -1316,6 +1520,17 @@ async def fetch_models_from_provider(payload: FetchModelsPayload):
 
     base_url = (payload.base_url or "").strip()
     binding = (payload.binding or "").strip().lower() or "openai"
+    _require_deployment_owner_provider(binding)
+    stored_catalog = get_model_catalog_service().load()
+    if (
+        payload.profile_id
+        and payload.profile_id in _protected_profile_ids(stored_catalog)
+        and not is_deployment_owner(catalog=stored_catalog)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Subscription profiles are managed by the deployment owner.",
+        )
     if not base_url and binding != "codebuddy":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1324,7 +1539,7 @@ async def fetch_models_from_provider(payload: FetchModelsPayload):
 
     api_key = payload.api_key
     if api_key == CATALOG_SECRET_MASK and payload.profile_id:
-        llm_service = get_model_catalog_service().load().get("services", {}).get("llm", {})
+        llm_service = stored_catalog.get("services", {}).get("llm", {})
         profile = next(
             (
                 item
@@ -1473,10 +1688,16 @@ async def update_enabled_tools(update: EnabledToolsUpdate):
 @router.post("/tests/{service}/start")
 async def start_service_test(service: str, payload: CatalogPayload | None = None):
     _require_settings_admin()
-    catalog = None
+    catalog_service = get_model_catalog_service()
+    current = catalog_service.load()
+    catalog = current
     if payload is not None:
-        current = get_model_catalog_service().load()
-        catalog = restore_catalog_secrets(payload.catalog, current)
+        catalog = _prepare_catalog_write(
+            current,
+            restore_catalog_secrets(payload.catalog, current),
+        )
+    if service == "llm":
+        _require_active_llm_owner(catalog)
     run = get_config_test_runner().start(service, catalog)
     return {"run_id": run.id}
 
@@ -1540,11 +1761,13 @@ async def complete_tour(payload: TourCompletePayload | None = None):
     _require_settings_admin()
     service = get_model_catalog_service()
     current = service.load()
-    catalog = (
+    proposed = (
         restore_catalog_secrets(payload.catalog, current)
         if payload and payload.catalog
         else current
     )
+    catalog = _prepare_catalog_write(current, proposed)
+    _require_active_llm_owner(catalog)
     applied = service.apply(catalog)
     _invalidate_runtime_caches()
     now = int(time.time())

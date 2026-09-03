@@ -528,6 +528,8 @@ class ResolvedLLMConfig:
     model: str
     provider_name: str
     provider_mode: str
+    profile_id: str | None = None
+    model_id: str | None = None
     binding_hint: str | None = None
     binding: str = "openai"
     api_key: str | list[str] = ""
@@ -629,14 +631,10 @@ def _load_catalog(catalog: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _with_personal_llm_profiles(catalog: dict[str, Any]) -> dict[str, Any]:
-    """Add the current owner's own owner-bound LLM profiles to *catalog*.
+    """Apply the legacy personal-profile compatibility hook.
 
-    An ordinary user's Codex profile lives in their own catalog rather than
-    the shared one (see :mod:`deeptutor.multi_user.personal_models`), so
-    resolving a personal selection against the shared catalog alone would
-    fail to find the profile it names. Imported lazily and guarded: the LLM
-    layer must keep resolving in contexts where multi-user state is absent
-    (CLI, tests, background jobs).
+    Per-user subscription profiles are no longer admitted; the hook remains
+    for compatibility and returns the shared catalogue unchanged.
     """
     try:
         from deeptutor.multi_user.personal_models import merge_personal_llm_profiles
@@ -782,6 +780,8 @@ def resolve_llm_runtime_config(
         model=resolved_model,
         provider_name=spec.name,
         provider_mode=spec.mode,
+        profile_id=_as_str((profile or {}).get("id")) or None,
+        model_id=_as_str((model or {}).get("id")) or None,
         binding_hint=binding_hint,
         binding=spec.name,
         api_key=api_key,

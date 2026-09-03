@@ -67,7 +67,7 @@ async def test_provider_uses_deeptutor_token_service_and_raw_sol_id(
         requests.append((url, headers, body))
         return "ok", [], "stop"
 
-    monkeypatch.setattr(module, "get_codex_oauth_service", lambda: service)
+    monkeypatch.setattr(module, "get_codex_deployment_runtime_service", lambda: service)
     monkeypatch.setattr(module, "_request_codex", request)
 
     image_url = "data:image/png;base64,QUJD"
@@ -129,7 +129,7 @@ async def test_401_refreshes_for_next_request_without_replay(
         request_count += 1
         raise CodexHTTPError(401, module._friendly_error(401))
 
-    monkeypatch.setattr(module, "get_codex_oauth_service", lambda: service)
+    monkeypatch.setattr(module, "get_codex_deployment_runtime_service", lambda: service)
     monkeypatch.setattr(module, "_request_codex", rejected_request)
 
     result = await OpenAICodexProvider().chat(
@@ -161,7 +161,7 @@ async def test_401_with_dead_refresh_token_does_not_promise_a_retry(
         raise CodexHTTPError(401, module._friendly_error(401))
 
     service.recover_after_unauthorized = failed_recovery  # type: ignore[method-assign]
-    monkeypatch.setattr(module, "get_codex_oauth_service", lambda: service)
+    monkeypatch.setattr(module, "get_codex_deployment_runtime_service", lambda: service)
     monkeypatch.setattr(module, "_request_codex", rejected_request)
 
     result = await OpenAICodexProvider().chat(
@@ -190,7 +190,7 @@ async def test_429_never_reads_openai_api_key_or_falls_back(
         destinations.append(url)
         raise CodexHTTPError(429, "Codex usage quota exceeded.")
 
-    monkeypatch.setattr(module, "get_codex_oauth_service", lambda: service)
+    monkeypatch.setattr(module, "get_codex_deployment_runtime_service", lambda: service)
     monkeypatch.setattr(module, "_request_codex", rate_limited)
 
     result = await OpenAICodexProvider().chat(
@@ -215,7 +215,7 @@ async def test_provider_does_not_expose_network_error_details(
     ) -> tuple[str, list[Any], str]:
         raise RuntimeError("private proxy host and token")
 
-    monkeypatch.setattr(module, "get_codex_oauth_service", lambda: service)
+    monkeypatch.setattr(module, "get_codex_deployment_runtime_service", lambda: service)
     monkeypatch.setattr(module, "_request_codex", network_failure)
 
     result = await OpenAICodexProvider().chat(
@@ -248,7 +248,7 @@ async def test_transport_failure_raises_sanitized_retryable_error(
     ) -> tuple[str, list[Any], str]:
         raise transport_error
 
-    monkeypatch.setattr(module, "get_codex_oauth_service", lambda: service)
+    monkeypatch.setattr(module, "get_codex_deployment_runtime_service", lambda: service)
     monkeypatch.setattr(module, "_request_codex", transport_failure)
 
     with pytest.raises(LLMProviderTransportError) as exc_info:
@@ -266,5 +266,5 @@ def test_provider_source_no_longer_imports_oauth_cli_kit() -> None:
 
     assert source is not None
     assert "oauth_cli_kit" not in source
-    assert "get_codex_oauth_service" in source
+    assert "get_codex_deployment_runtime_service" in source
     assert OpenAICodexProvider().get_default_model() == "openai-codex/gpt-5.6-sol"

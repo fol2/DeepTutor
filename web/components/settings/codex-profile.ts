@@ -28,6 +28,45 @@ export function isBoundManagedCodexProfile(
   );
 }
 
+/** Connection fields consumed by the subscription-backed LLM providers. */
+export function subscriptionProviderFields(
+  service: ServiceName,
+  providerValue: string,
+): { apiKey: boolean; baseUrl: boolean; baseUrlRequired: boolean } | null {
+  if (service !== "llm") return null;
+  if (providerValue === "cursor_subscription") {
+    return { apiKey: true, baseUrl: false, baseUrlRequired: false };
+  }
+  if (providerValue === "grok_subscription") {
+    return { apiKey: false, baseUrl: false, baseUrlRequired: false };
+  }
+  return null;
+}
+
+export type SubscriptionProviderModel = {
+  name: string;
+  model: string;
+};
+
+/** The single model exposed by each owner-bound subscription integration. */
+export function subscriptionProviderDefaultModel(
+  providerValue: string,
+): SubscriptionProviderModel | null {
+  if (providerValue === "cursor_subscription") {
+    return {
+      name: "Grok 4.6 High (Cursor Ultra)",
+      model: "cursor-grok-4.6-high",
+    };
+  }
+  if (providerValue === "grok_subscription") {
+    return {
+      name: "Grok 4.6 High (SuperGrok)",
+      model: "grok-4.6-high",
+    };
+  }
+  return null;
+}
+
 /**
  * Whether a profile authenticates through Codex OAuth instead of typed credentials.
  *

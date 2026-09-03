@@ -92,6 +92,11 @@ class _FakeCatalogService:
     def load(self) -> dict[str, Any]:
         return deepcopy(self._catalog)
 
+    def update(self, mutator) -> dict[str, Any]:
+        current = self.load()
+        mutator(current)
+        return self.save(current)
+
     def apply(self, catalog: dict[str, Any]) -> dict[str, Any]:
         current = self.save(catalog)
         return {
@@ -624,6 +629,555 @@ async def test_get_llm_options_returns_redacted_catalog(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_get_llm_options_hides_deployment_owner_subscriptions_from_later_admin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user, set_current_user
+    from deeptutor.multi_user.models import CurrentUser, UserScope
+
+    catalog = _build_catalog(
+        llm_model="qwen3.5:4b",
+        llm_base_url="http://localhost:11434/v1",
+        llm_api_key="",
+        embedding_model="text-embedding-3-small",
+        embedding_base_url="https://emb.example/v1/embeddings",
+        embedding_api_key="emb-key",
+    )
+    llm = catalog["services"]["llm"]
+    llm["profiles"].extend(
+        [
+            {
+                "id": "llm-profile-cursor",
+                "name": "Cursor Ultra",
+                "binding": "cursor_subscription",
+                "models": [
+                    {
+                        "id": "llm-model-cursor-grok",
+                        "name": "Grok 4.6 High",
+                        "model": "cursor-grok-4.6-high",
+                    }
+                ],
+            },
+            {
+                "id": "llm-profile-grok",
+                "name": "SuperGrok Heavy",
+                "binding": "grok_subscription",
+                "models": [
+                    {
+                        "id": "llm-model-grok",
+                        "name": "Grok 4.6 High",
+                        "model": "grok-4.6-high",
+                    }
+                ],
+            },
+        ]
+    )
+    llm["active_profile_id"] = "llm-profile-cursor"
+    llm["active_model_id"] = "llm-model-cursor-grok"
+    service = _FakeCatalogService(catalog)
+    monkeypatch.setattr(settings_router, "get_model_catalog_service", lambda: service)
+    monkeypatch.setattr(
+        model_access,
+        "load_users",
+        lambda: {
+            "owner@example.com": {"id": "u_owner", "role": "admin"},
+            "second@example.com": {"id": "u_second", "role": "admin"},
+        },
+    )
+    later_admin = CurrentUser(
+        id="u_second",
+        username="second@example.com",
+        role="admin",
+        scope=UserScope(kind="admin", user_id="u_second", root=tmp_path / "admin"),
+    )
+    token = set_current_user(later_admin)
+    try:
+        response = await settings_router.get_llm_options()
+    finally:
+        reset_current_user(token)
+
+    assert response["active"] is None
+    assert [option["profile_id"] for option in response["options"]] == ["llm-profile-default"]
+    assert response["options"][0]["model"] == "qwen3.5:4b"
+
+
+def _subscription_catalog(binding: str) -> dict[str, Any]:
+    model = "cursor-grok-4.6-high" if binding == "cursor_subscription" else "grok-4.6-high"
+    catalog = _build_catalog(
+        llm_model=model,
+        llm_base_url="",
+        llm_api_key="owner-subscription-secret",
+        embedding_model="text-embedding-3-small",
+        embedding_base_url="https://emb.example/v1/embeddings",
+        embedding_api_key="emb-key",
+    )
+    catalog["services"]["llm"]["profiles"][0]["binding"] = binding
+    return catalog
+
+
+class _CapturingConfigTestRunner:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any] | None]] = []
+
+    def start(self, service: str, catalog: dict[str, Any] | None = None) -> SimpleNamespace:
+        self.calls.append((service, deepcopy(catalog)))
+        return SimpleNamespace(id="llm-test-run")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", ["cursor_subscription", "grok_subscription"])
+@pytest.mark.parametrize("uses_draft", [False, True], ids=["active-catalog", "draft-catalog"])
+async def test_later_admin_cannot_start_owner_subscription_llm_test(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    binding: str,
+    uses_draft: bool,
+) -> None:
+    """Reject before ConfigTestRunner loses the request ContextVar in its thread."""
+    from fastapi import HTTPException
+
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user, set_current_user
+    from deeptutor.multi_user.models import CurrentUser, UserScope
+
+    protected_catalog = _subscription_catalog(binding)
+    current_catalog = (
+        _build_catalog(
+            llm_model="qwen3.5:4b",
+            llm_base_url="http://localhost:11434/v1",
+            llm_api_key="",
+            embedding_model="text-embedding-3-small",
+            embedding_base_url="https://emb.example/v1/embeddings",
+            embedding_api_key="emb-key",
+        )
+        if uses_draft
+        else protected_catalog
+    )
+    service = _FakeCatalogService(current_catalog)
+    runner = _CapturingConfigTestRunner()
+    monkeypatch.setattr(settings_router, "get_model_catalog_service", lambda: service)
+    monkeypatch.setattr(settings_router, "get_config_test_runner", lambda: runner)
+    monkeypatch.setattr(
+        model_access,
+        "load_users",
+        lambda: {
+            "owner@example.com": {"id": "u_owner", "role": "admin"},
+            "second@example.com": {"id": "u_second", "role": "admin"},
+        },
+    )
+    later_admin = CurrentUser(
+        id="u_second",
+        username="second@example.com",
+        role="admin",
+        scope=UserScope(kind="admin", user_id="u_second", root=tmp_path / "admin"),
+    )
+    payload = settings_router.CatalogPayload(catalog=protected_catalog) if uses_draft else None
+
+    token = set_current_user(later_admin)
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await settings_router.start_service_test("llm", payload)
+    finally:
+        reset_current_user(token)
+
+    assert exc_info.value.status_code == 403
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", ["cursor_subscription", "grok_subscription"])
+@pytest.mark.parametrize("uses_draft", [False, True], ids=["active-catalog", "draft-catalog"])
+async def test_deployment_owner_can_start_owner_subscription_llm_test(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    binding: str,
+    uses_draft: bool,
+) -> None:
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user, set_current_user
+    from deeptutor.multi_user.models import CurrentUser, UserScope
+
+    protected_catalog = _subscription_catalog(binding)
+    current_catalog = (
+        _build_catalog(
+            llm_model="qwen3.5:4b",
+            llm_base_url="http://localhost:11434/v1",
+            llm_api_key="",
+            embedding_model="text-embedding-3-small",
+            embedding_base_url="https://emb.example/v1/embeddings",
+            embedding_api_key="emb-key",
+        )
+        if uses_draft
+        else protected_catalog
+    )
+    service = _FakeCatalogService(current_catalog)
+    runner = _CapturingConfigTestRunner()
+    monkeypatch.setattr(settings_router, "get_model_catalog_service", lambda: service)
+    monkeypatch.setattr(settings_router, "get_config_test_runner", lambda: runner)
+    monkeypatch.setattr(
+        model_access,
+        "load_users",
+        lambda: {
+            "owner@example.com": {"id": "u_owner", "role": "admin"},
+            "second@example.com": {"id": "u_second", "role": "admin"},
+        },
+    )
+    owner = CurrentUser(
+        id="u_owner",
+        username="owner@example.com",
+        role="admin",
+        scope=UserScope(kind="admin", user_id="u_owner", root=tmp_path / "admin"),
+    )
+    payload = settings_router.CatalogPayload(catalog=protected_catalog) if uses_draft else None
+
+    token = set_current_user(owner)
+    try:
+        response = await settings_router.start_service_test("llm", payload)
+    finally:
+        reset_current_user(token)
+
+    assert response == {"run_id": "llm-test-run"}
+    assert len(runner.calls) == 1
+    assert runner.calls[0][0] == "llm"
+    tested_catalog = runner.calls[0][1]
+    assert tested_catalog is not None
+    assert tested_catalog["services"]["llm"]["profiles"][0]["binding"] == binding
+
+
+def _set_subscription_test_actor(monkeypatch, tmp_path, user_id: str):
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import set_current_user
+    from deeptutor.multi_user.models import CurrentUser, UserScope
+
+    monkeypatch.setattr(
+        model_access,
+        "load_users",
+        lambda: {
+            "owner@example.com": {"id": "u_owner", "role": "admin"},
+            "second@example.com": {"id": "u_second", "role": "admin"},
+        },
+    )
+    return set_current_user(
+        CurrentUser(
+            id=user_id,
+            username=f"{user_id}@example.com",
+            role="admin",
+            scope=UserScope(kind="admin", user_id=user_id, root=tmp_path / "admin"),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_owner_catalog_write_binds_subscription_identity_durably(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user
+
+    current = _build_catalog(
+        llm_model="qwen3.5:4b",
+        llm_base_url="http://localhost:11434/v1",
+        llm_api_key="",
+        embedding_model="text-embedding-3-small",
+        embedding_base_url="https://emb.example/v1/embeddings",
+        embedding_api_key="emb-key",
+    )
+    service = _FakeCatalogService(current)
+    monkeypatch.setattr(settings_router, "get_model_catalog_service", lambda: service)
+    monkeypatch.setattr(settings_router, "_invalidate_runtime_caches", lambda: None)
+    token = _set_subscription_test_actor(monkeypatch, tmp_path, "u_owner")
+    try:
+        await settings_router.update_catalog(
+            settings_router.CatalogPayload(catalog=_subscription_catalog("cursor_subscription"))
+        )
+    finally:
+        reset_current_user(token)
+
+    assert service.load()[model_access.DEPLOYMENT_OWNER_ID_FIELD] == "u_owner"
+
+
+@pytest.mark.asyncio
+async def test_removing_subscription_profile_does_not_release_persisted_grok_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Deleting a profile is not an implicit credential-ownership transfer."""
+    from fastapi import HTTPException
+
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user
+
+    current = _subscription_catalog("grok_subscription")
+    current[model_access.DEPLOYMENT_OWNER_ID_FIELD] = "u_owner"
+    service = _FakeCatalogService(current)
+    monkeypatch.setattr(settings_router, "get_model_catalog_service", lambda: service)
+    monkeypatch.setattr(settings_router, "_invalidate_runtime_caches", lambda: None)
+
+    local_catalog = _build_catalog(
+        llm_model="qwen3.5:4b",
+        llm_base_url="http://localhost:11434/v1",
+        llm_api_key="",
+        embedding_model="text-embedding-3-small",
+        embedding_base_url="https://emb.example/v1/embeddings",
+        embedding_api_key="emb-key",
+    )
+    owner_token = _set_subscription_test_actor(monkeypatch, tmp_path, "u_owner")
+    try:
+        await settings_router.update_catalog(settings_router.CatalogPayload(catalog=local_catalog))
+    finally:
+        reset_current_user(owner_token)
+
+    assert service.load()[model_access.DEPLOYMENT_OWNER_ID_FIELD] == "u_owner"
+    later_token = _set_subscription_test_actor(monkeypatch, tmp_path, "u_second")
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await settings_router.update_catalog(
+                settings_router.CatalogPayload(catalog=_subscription_catalog("grok_subscription"))
+            )
+    finally:
+        reset_current_user(later_token)
+
+    assert exc_info.value.status_code == 403
+    assert service.load()[model_access.DEPLOYMENT_OWNER_ID_FIELD] == "u_owner"
+
+
+@pytest.mark.asyncio
+async def test_external_identity_admin_first_subscription_write_claims_catalogue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """PocketBase admins are authenticated without a users.json mirror."""
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user, set_current_user
+    from deeptutor.multi_user.models import CurrentUser, UserScope
+    from deeptutor.services import auth as auth_service
+
+    current = _build_catalog(
+        llm_model="qwen3.5:4b",
+        llm_base_url="http://localhost:11434/v1",
+        llm_api_key="",
+        embedding_model="text-embedding-3-small",
+        embedding_base_url="https://emb.example/v1/embeddings",
+        embedding_api_key="emb-key",
+    )
+    service = _FakeCatalogService(current)
+    monkeypatch.setattr(settings_router, "get_model_catalog_service", lambda: service)
+    monkeypatch.setattr(settings_router, "_invalidate_runtime_caches", lambda: None)
+    monkeypatch.setattr(model_access, "load_users", lambda: {})
+    monkeypatch.setattr(auth_service, "POCKETBASE_ENABLED", True)
+    actor = CurrentUser(
+        id="pb_owner",
+        username="owner@example.com",
+        role="admin",
+        scope=UserScope(kind="admin", user_id="pb_owner", root=tmp_path / "admin"),
+    )
+    token = set_current_user(actor)
+    try:
+        await settings_router.update_catalog(
+            settings_router.CatalogPayload(catalog=_subscription_catalog("cursor_subscription"))
+        )
+    finally:
+        reset_current_user(token)
+
+    assert service.load()[model_access.DEPLOYMENT_OWNER_ID_FIELD] == "pb_owner"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("binding", "bad_models"),
+    [
+        (
+            "cursor_subscription",
+            [{"id": "wrong", "name": "Wrong", "model": "gpt-4o"}],
+        ),
+        (
+            "grok_subscription",
+            [
+                {"id": "one", "name": "Grok", "model": "grok-4.6-high"},
+                {"id": "two", "name": "Extra", "model": "grok-4.6-high"},
+            ],
+        ),
+    ],
+)
+async def test_fixed_subscription_catalogue_rejects_unrunnable_model_edits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    binding: str,
+    bad_models: list[dict[str, str]],
+) -> None:
+    from fastapi import HTTPException
+
+    from deeptutor.multi_user.context import reset_current_user
+
+    current = _build_catalog(
+        llm_model="qwen3.5:4b",
+        llm_base_url="http://localhost:11434/v1",
+        llm_api_key="",
+        embedding_model="text-embedding-3-small",
+        embedding_base_url="https://emb.example/v1/embeddings",
+        embedding_api_key="emb-key",
+    )
+    service = _FakeCatalogService(current)
+    monkeypatch.setattr(settings_router, "get_model_catalog_service", lambda: service)
+    token = _set_subscription_test_actor(monkeypatch, tmp_path, "u_owner")
+    draft = _subscription_catalog(binding)
+    draft["services"]["llm"]["profiles"][0]["models"] = bad_models
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await settings_router.update_catalog(settings_router.CatalogPayload(catalog=draft))
+    finally:
+        reset_current_user(token)
+
+    assert exc_info.value.status_code == 400
+    assert service.load() == current
+
+
+@pytest.mark.asyncio
+async def test_later_admin_catalog_view_hides_owner_profiles_and_provider_choices(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user
+
+    catalog = _subscription_catalog("cursor_subscription")
+    catalog[model_access.DEPLOYMENT_OWNER_ID_FIELD] = "u_owner"
+    service = _FakeCatalogService(catalog)
+    monkeypatch.setattr(settings_router, "get_model_catalog_service", lambda: service)
+    token = _set_subscription_test_actor(monkeypatch, tmp_path, "u_second")
+    try:
+        settings_payload = await settings_router.get_settings()
+        catalog_payload = await settings_router.get_catalog()
+    finally:
+        reset_current_user(token)
+
+    assert settings_payload["catalog"]["services"]["llm"]["profiles"] == []
+    assert catalog_payload["catalog"]["services"]["llm"]["profiles"] == []
+    assert settings_payload["catalog"]["services"]["llm"]["active_profile_id"] is None
+    provider_values = {item["value"] for item in settings_payload["providers"]["llm"]}
+    assert "cursor_subscription" not in provider_values
+    assert "grok_subscription" not in provider_values
+    assert "codebuddy" not in provider_values
+
+
+@pytest.mark.asyncio
+async def test_later_admin_cannot_rebind_owner_profile_and_restore_its_masked_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from fastapi import HTTPException
+
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user
+
+    current = _subscription_catalog("cursor_subscription")
+    current[model_access.DEPLOYMENT_OWNER_ID_FIELD] = "u_owner"
+    service = _FakeCatalogService(current)
+    monkeypatch.setattr(settings_router, "get_model_catalog_service", lambda: service)
+    monkeypatch.setattr(settings_router, "_invalidate_runtime_caches", lambda: None)
+    draft = settings_router.redact_catalog_secrets(current)
+    profile = draft["services"]["llm"]["profiles"][0]
+    profile["binding"] = "custom"
+    profile["base_url"] = "https://attacker.invalid/v1"
+    token = _set_subscription_test_actor(monkeypatch, tmp_path, "u_second")
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await settings_router.update_catalog(settings_router.CatalogPayload(catalog=draft))
+    finally:
+        reset_current_user(token)
+
+    assert exc_info.value.status_code == 403
+    stored = service.load()["services"]["llm"]["profiles"][0]
+    assert stored["binding"] == "cursor_subscription"
+    assert stored["api_key"] == "owner-subscription-secret"
+
+
+@pytest.mark.asyncio
+async def test_later_admin_filtered_catalog_roundtrip_preserves_hidden_owner_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user
+
+    current = _subscription_catalog("cursor_subscription")
+    current[model_access.DEPLOYMENT_OWNER_ID_FIELD] = "u_owner"
+    current["services"]["llm"]["profiles"].append(
+        {
+            "id": "llm-profile-local",
+            "name": "Local Qwen",
+            "binding": "ollama",
+            "base_url": "http://localhost:11434/v1",
+            "api_key": "",
+            "models": [{"id": "llm-model-local", "name": "Qwen", "model": "qwen3.5:4b"}],
+        }
+    )
+    service = _FakeCatalogService(current)
+    monkeypatch.setattr(settings_router, "get_model_catalog_service", lambda: service)
+    monkeypatch.setattr(settings_router, "_invalidate_runtime_caches", lambda: None)
+    token = _set_subscription_test_actor(monkeypatch, tmp_path, "u_second")
+    try:
+        visible = (await settings_router.get_catalog())["catalog"]
+        response = await settings_router.update_catalog(
+            settings_router.CatalogPayload(catalog=visible)
+        )
+    finally:
+        reset_current_user(token)
+
+    stored = service.load()
+    protected = [
+        profile
+        for profile in stored["services"]["llm"]["profiles"]
+        if profile.get("binding") == "cursor_subscription"
+    ]
+    assert len(protected) == 1
+    assert protected[0]["api_key"] == "owner-subscription-secret"
+    assert stored["services"]["llm"]["active_profile_id"] == "llm-profile-default"
+    assert response["catalog"]["services"]["llm"]["profiles"] == [
+        visible["services"]["llm"]["profiles"][0]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_later_admin_cannot_apply_or_fetch_with_hidden_owner_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from fastapi import HTTPException
+
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user
+    import deeptutor.services.llm.factory as factory_module
+
+    current = _subscription_catalog("cursor_subscription")
+    current[model_access.DEPLOYMENT_OWNER_ID_FIELD] = "u_owner"
+    service = _FakeCatalogService(current)
+    monkeypatch.setattr(settings_router, "get_model_catalog_service", lambda: service)
+    fetched = False
+
+    async def _unexpected_fetch(*_args, **_kwargs):
+        nonlocal fetched
+        fetched = True
+        return []
+
+    monkeypatch.setattr(factory_module, "fetch_models", _unexpected_fetch)
+    token = _set_subscription_test_actor(monkeypatch, tmp_path, "u_second")
+    try:
+        with pytest.raises(HTTPException) as apply_error:
+            await settings_router.apply_catalog()
+        with pytest.raises(HTTPException) as fetch_error:
+            await settings_router.fetch_models_from_provider(
+                settings_router.FetchModelsPayload(
+                    binding="custom",
+                    base_url="https://attacker.invalid/v1",
+                    api_key=settings_router.CATALOG_SECRET_MASK,
+                    profile_id="llm-profile-default",
+                )
+            )
+    finally:
+        reset_current_user(token)
+
+    assert apply_error.value.status_code == 403
+    assert fetch_error.value.status_code == 403
+    assert fetched is False
+
+
+@pytest.mark.asyncio
 async def test_get_settings_never_returns_catalog_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     catalog = _build_catalog(
         llm_model="gpt-4o-mini",
@@ -1117,6 +1671,9 @@ async def test_fetch_models_allows_codebuddy_without_base_url(
         return ["hy3", "glm-5.2"]
 
     monkeypatch.setattr(factory_module, "fetch_models", _fake_fetch)
+    monkeypatch.setattr(
+        settings_router, "_require_deployment_owner_provider", lambda _binding: None
+    )
 
     response = await settings_router.fetch_models_from_provider(
         settings_router.FetchModelsPayload(binding="codebuddy")
@@ -1146,6 +1703,9 @@ async def test_codebuddy_auth_routes_use_admin_scoped_service(monkeypatch) -> No
             return {"connection": "disconnected", "user_label": None}
 
     monkeypatch.setattr(settings_router, "_require_settings_admin", lambda: None)
+    monkeypatch.setattr(
+        settings_router, "_require_deployment_owner_provider", lambda _binding: None
+    )
     monkeypatch.setattr(settings_router, "get_codebuddy_auth_service", lambda: FakeService())
 
     assert await settings_router.get_codebuddy_auth_status() == {"connection": "connected"}
@@ -1234,28 +1794,51 @@ def test_codex_provider_choice_is_advertised_as_oauth() -> None:
     # API-key providers keep the same shape, so the frontend never special-cases
     # a missing field.
     assert llm["openai"]["auth_mode"] == "api_key"
+    assert llm["cursor_subscription"] == {
+        "value": "cursor_subscription",
+        "label": "Cursor Ultra",
+        "base_url": "",
+        "auth_mode": "api_key",
+    }
+    assert llm["grok_subscription"]["auth_mode"] == "oauth"
 
 
 @pytest.mark.asyncio
-async def test_codex_oauth_status_is_reachable_by_an_ordinary_user(
+@pytest.mark.parametrize(
+    "route_name",
+    [
+        "start_openai_codex_oauth",
+        "get_openai_codex_oauth_status",
+        "cancel_openai_codex_oauth",
+        "refresh_openai_codex_models",
+        "logout_openai_codex_oauth",
+        "update_openai_codex_reasoning_effort",
+    ],
+)
+@pytest.mark.parametrize(
+    ("actor_id", "is_admin"),
+    [("u_child", False), ("u_later_admin", True)],
+)
+async def test_codex_oauth_lifecycle_is_reserved_for_the_deployment_owner(
     monkeypatch: pytest.MonkeyPatch,
+    route_name: str,
+    actor_id: str,
+    is_admin: bool,
 ) -> None:
-    """Codex OAuth is personal, not administrative (#781).
+    """Neither a child account nor a later administrator may bind owner credentials."""
+    from fastapi import HTTPException
 
-    This route used to be administrator-gated, which left ordinary users with
-    no path to Codex at all: an owner-bound profile is never grantable, so
-    they could neither be given one nor sign in for themselves. Everything it
-    touches — credential store, model catalog, callback route — resolves from
-    owner scope, so it is the caller's own login either way. The full
-    authorization contract, including the partner refusal that replaced the
-    admin gate, lives in ``tests/api/test_codex_oauth_scope.py``.
-    """
+    from deeptutor.multi_user import model_access
+
+    actor = SimpleNamespace(id=actor_id, is_admin=is_admin)
+    owner_catalog = {
+        "deployment_owner_user_id": "u_owner",
+        "services": {"llm": {"profiles": []}},
+    }
     fake = _FakeCodexOAuthService()
-    monkeypatch.setattr(
-        settings_router,
-        "get_current_user",
-        lambda: SimpleNamespace(id="u_alice", is_admin=False),
-    )
+    monkeypatch.setattr(settings_router, "get_current_user", lambda: actor)
+    monkeypatch.setattr(model_access, "get_current_user", lambda: actor)
+    monkeypatch.setattr(model_access, "admin_catalog", lambda: owner_catalog)
     monkeypatch.setattr(
         settings_router,
         "get_codex_oauth_service",
@@ -1263,7 +1846,21 @@ async def test_codex_oauth_status_is_reachable_by_an_ordinary_user(
         raising=False,
     )
 
-    assert await settings_router.get_openai_codex_oauth_status() == fake.public_status()
+    route = getattr(settings_router, route_name)
+    with pytest.raises(HTTPException) as exc_info:
+        if route_name == "update_openai_codex_reasoning_effort":
+            await route(
+                settings_router.CodexReasoningEffortUpdate(
+                    model="gpt-5.6-sol",
+                    reasoning_effort="high",
+                )
+            )
+        else:
+            await route()
+
+    assert exc_info.value.status_code == 403
+    assert "deployment owner" in str(exc_info.value.detail).lower()
+    assert fake.calls == []
 
 
 @pytest.mark.asyncio
@@ -1271,6 +1868,11 @@ async def test_codex_oauth_routes_return_only_public_service_payloads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _FakeCodexOAuthService()
+    monkeypatch.setattr(
+        settings_router,
+        "require_deployment_owner_binding",
+        lambda binding: None,
+    )
     monkeypatch.setattr(
         settings_router,
         "get_current_user",
@@ -1324,6 +1926,11 @@ async def test_codex_oauth_error_maps_to_sanitized_http_detail(
         settings_router,
         "get_current_user",
         lambda: SimpleNamespace(id="root", is_admin=True),
+    )
+    monkeypatch.setattr(
+        settings_router,
+        "require_deployment_owner_binding",
+        lambda binding: None,
     )
     monkeypatch.setattr(
         settings_router,

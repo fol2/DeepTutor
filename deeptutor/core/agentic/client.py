@@ -34,7 +34,16 @@ from deeptutor.services.provider_registry import find_by_name, model_overrides_f
 # Providers that don't reliably support OpenAI function-calling. The loop
 # still runs without tool schemas — the model just produces prose.
 _NATIVE_TOOL_BLOCKED_BINDINGS: frozenset[str] = frozenset(
-    {"anthropic", "claude", "ollama", "lm_studio", "vllm", "llama_cpp"}
+    {
+        "anthropic",
+        "claude",
+        "cursor_subscription",
+        "grok_subscription",
+        "ollama",
+        "lm_studio",
+        "vllm",
+        "llama_cpp",
+    }
 )
 
 # Native provider adapters whose backends speak OpenAI-style function calling
@@ -61,6 +70,8 @@ class LLMClientConfig:
     api_version: str | None = None
     extra_headers: dict[str, str] | None = None
     reasoning_effort: str | None = None
+    profile_id: str | None = None
+    model_id: str | None = None
 
 
 def _client_cache_key(
@@ -75,10 +86,13 @@ def _client_cache_key(
         loop,
         config.binding,
         config.model or "",
+        config.profile_id or "",
+        config.model_id or "",
         secret,
         config.base_url or "",
         config.api_version or "",
         headers,
+        config.reasoning_effort or "",
         disable_ssl_verify,
     )
 
@@ -189,6 +203,15 @@ def build_openai_client(config: LLMClientConfig) -> Any:
     handle itself owns an HTTP connection pool, so reusing it is both faster
     and prevents a new allocator/socket high-water mark on every turn.
     """
+    from deeptutor.multi_user.model_access import require_deployment_owner_binding
+
+    require_deployment_owner_binding(
+        config.binding,
+        model=config.model,
+        profile_id=config.profile_id,
+        model_id=config.model_id,
+        reasoning_effort=config.reasoning_effort,
+    )
     disable_ssl_verify = bool(load_system_settings()["disable_ssl_verify"])
     try:
         loop = asyncio.get_running_loop()
@@ -240,6 +263,17 @@ def agentic_client_pool_size() -> int:
         return len(_agentic_client_pool)
 
 
+def _provider_adapter(provider: Any, config: LLMClientConfig) -> Any:
+    return _ProviderOpenAIAdapter(
+        provider,
+        binding=config.binding,
+        model=config.model,
+        profile_id=config.profile_id,
+        model_id=config.model_id,
+        reasoning_effort=config.reasoning_effort,
+    )
+
+
 def _build_anthropic_adapter(config: LLMClientConfig, spec: Any) -> Any:
     from deeptutor.services.llm.provider_core import AnthropicProvider
 
@@ -250,17 +284,45 @@ def _build_anthropic_adapter(config: LLMClientConfig, spec: Any) -> Any:
         extra_headers=config.extra_headers,
         supports_prompt_caching=spec.supports_prompt_caching,
     )
-    return _ProviderOpenAIAdapter(anthropic_provider)
+    return _provider_adapter(anthropic_provider, config)
 
 
 def _build_codex_adapter(config: LLMClientConfig, spec: Any) -> Any:
     from deeptutor.services.codex_auth.constants import CODEX_DEFAULT_MODEL_ID
     from deeptutor.services.llm.provider_core import OpenAICodexProvider
 
+    del spec
     oauth_provider = OpenAICodexProvider(
         default_model=config.model or CODEX_DEFAULT_MODEL_ID,
+        profile_id=config.profile_id,
+        model_id=config.model_id,
     )
-    return _ProviderOpenAIAdapter(oauth_provider)
+    return _provider_adapter(oauth_provider, config)
+
+
+def _build_cursor_adapter(config: LLMClientConfig, spec: Any) -> Any:
+    del spec
+    from deeptutor.services.llm.provider_core import CursorSDKProvider
+
+    return _provider_adapter(
+        CursorSDKProvider(
+            api_key=primary_api_key(config.api_key),
+            default_model=config.model,
+            profile_id=config.profile_id,
+            model_id=config.model_id,
+        ),
+        config,
+    )
+
+
+def _build_grok_subscription_adapter(config: LLMClientConfig, spec: Any) -> Any:
+    del spec
+    from deeptutor.services.llm.provider_core import GrokSubscriptionProvider
+
+    return _provider_adapter(
+        GrokSubscriptionProvider(profile_id=config.profile_id, model_id=config.model_id),
+        config,
+    )
 
 
 def _build_copilot_adapter(config: LLMClientConfig, spec: Any) -> Any:
@@ -269,7 +331,7 @@ def _build_copilot_adapter(config: LLMClientConfig, spec: Any) -> Any:
     copilot_provider = GitHubCopilotProvider(
         default_model=config.model or "github-copilot/gpt-4.1",
     )
-    return _ProviderOpenAIAdapter(copilot_provider)
+    return _provider_adapter(copilot_provider, config)
 
 
 def _build_codebuddy_adapter(config: LLMClientConfig, spec: Any) -> Any:
@@ -281,7 +343,7 @@ def _build_codebuddy_adapter(config: LLMClientConfig, spec: Any) -> Any:
         api_key=primary_api_key(config.api_key),
         default_model=config.model or "codebuddy/hy3",
     )
-    return _ProviderOpenAIAdapter(codebuddy_provider)
+    return _provider_adapter(codebuddy_provider, config)
 
 
 def _build_direct_openai_adapter(config: LLMClientConfig, spec: Any) -> Any:
@@ -295,12 +357,14 @@ def _build_direct_openai_adapter(config: LLMClientConfig, spec: Any) -> Any:
         spec=spec,
         provider_name=config.binding,
     )
-    return _ProviderOpenAIAdapter(provider)
+    return _provider_adapter(provider, config)
 
 
 _NATIVE_ADAPTER_BUILDERS: dict[str, Callable[[LLMClientConfig, Any], Any]] = {
     "anthropic": _build_anthropic_adapter,
     "openai_codex": _build_codex_adapter,
+    "cursor_sdk": _build_cursor_adapter,
+    "grok_subscription": _build_grok_subscription_adapter,
     "github_copilot": _build_copilot_adapter,
     "codebuddy": _build_codebuddy_adapter,
 }
@@ -335,9 +399,38 @@ def _build_native_provider_adapter(config: LLMClientConfig, spec: Any) -> Any | 
 class _ProviderOpenAIAdapter:
     """OpenAI chat-completions facade backed by a native provider."""
 
-    def __init__(self, provider: Any):
+    def __init__(
+        self,
+        provider: Any,
+        *,
+        binding: str | None = None,
+        model: str | None = None,
+        profile_id: str | None = None,
+        model_id: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
         self._provider = provider
+        self._binding = binding
+        self._model = model
+        self._profile_id = profile_id
+        self._model_id = model_id
+        self._reasoning_effort = reasoning_effort
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_completion))
+
+    def _require_current_grant(
+        self,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> None:
+        from deeptutor.multi_user.model_access import require_deployment_owner_binding
+
+        require_deployment_owner_binding(
+            self._binding,
+            model=model or self._model,
+            profile_id=self._profile_id,
+            model_id=self._model_id,
+            reasoning_effort=reasoning_effort or self._reasoning_effort,
+        )
 
     async def close(self) -> None:
         close = getattr(self._provider, "aclose", None)
@@ -354,7 +447,7 @@ class _ProviderOpenAIAdapter:
         max_tokens = kwargs.pop("max_completion_tokens", None)
         if max_tokens is None:
             max_tokens = kwargs.pop("max_tokens", 4096)
-        reasoning_effort = kwargs.pop("reasoning_effort", None)
+        reasoning_effort = kwargs.pop("reasoning_effort", None) or self._reasoning_effort
         kwargs.pop("stream_options", None)
 
         if stream:
@@ -368,8 +461,10 @@ class _ProviderOpenAIAdapter:
                 reasoning_effort=reasoning_effort,
                 tool_choice=tool_choice,
                 extra_kwargs=kwargs,
+                require_current_grant=self._require_current_grant,
             )
 
+        self._require_current_grant(model, reasoning_effort)
         response = await self._provider.chat(
             messages=messages,
             tools=tools,
@@ -413,6 +508,7 @@ class _ProviderOpenAIStream:
         reasoning_effort: str | None,
         tool_choice: str | dict[str, Any] | None,
         extra_kwargs: dict[str, Any],
+        require_current_grant: Callable[[str | None, str | None], None] | None = None,
     ) -> None:
         self._provider = provider
         self._messages = messages
@@ -423,6 +519,7 @@ class _ProviderOpenAIStream:
         self._reasoning_effort = reasoning_effort
         self._tool_choice = tool_choice
         self._extra_kwargs = extra_kwargs
+        self._require_current_grant = require_current_grant
         self._queue: asyncio.Queue[Any] | None = None
         self._task: asyncio.Task[None] | None = None
         self._emitted_content = False
@@ -457,6 +554,8 @@ class _ProviderOpenAIStream:
                 await self._queue.put(_openai_stream_chunk(content=text))
 
         try:
+            if self._require_current_grant is not None:
+                self._require_current_grant(self._model, self._reasoning_effort)
             response = await self._provider.chat_stream(
                 messages=self._messages,
                 tools=self._tools,

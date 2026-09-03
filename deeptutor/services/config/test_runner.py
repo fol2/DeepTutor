@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import copy_context
 from dataclasses import dataclass, field
 import json
 import threading
@@ -85,7 +86,15 @@ class ConfigTestRunner:
         with self._lock:
             self._runs[run.id] = run
         resolved = catalog or get_model_catalog_service().load()
-        thread = threading.Thread(target=self._run_sync, args=(run, resolved), daemon=True)
+        # Request identity is held in a ContextVar. A raw thread would lose it
+        # and fall back to the local administrator, bypassing owner-bound
+        # provider checks performed inside the probe.
+        context = copy_context()
+        thread = threading.Thread(
+            target=context.run,
+            args=(self._run_sync, run, resolved),
+            daemon=True,
+        )
         thread.start()
         return run
 
@@ -223,6 +232,8 @@ class ConfigTestRunner:
             binding=resolved.binding,
             provider_name=resolved.provider_name,
             provider_mode=resolved.provider_mode,
+            profile_id=resolved.profile_id,
+            model_id=resolved.model_id,
             api_version=resolved.api_version,
             extra_headers=resolved.extra_headers,
             reasoning_effort=resolved.reasoning_effort,

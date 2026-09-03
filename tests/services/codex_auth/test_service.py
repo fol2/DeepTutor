@@ -163,6 +163,70 @@ def test_service_singleton_reads_frontend_port_only_when_created(
     assert captured["callback_forward_port"] == 4782
 
 
+@pytest.mark.asyncio
+async def test_learner_runtime_uses_seeded_deployment_owner_token_and_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A family grant reads the owner's Codex state, not learner-local state."""
+    from deeptutor.multi_user import paths as paths_module
+    from deeptutor.multi_user.context import reset_current_user, set_current_user
+    from deeptutor.multi_user.models import LOCAL_ADMIN_ID, CurrentUser, UserScope
+
+    admin_root = (tmp_path / "data").resolve()
+    monkeypatch.setattr(paths_module, "ADMIN_WORKSPACE_ROOT", admin_root)
+    monkeypatch.setattr(paths_module, "USERS_ROOT", admin_root / "users")
+    monkeypatch.setattr(paths_module, "SYSTEM_ROOT", admin_root / "system")
+    monkeypatch.setattr(paths_module, "_path_services", {})
+    monkeypatch.setattr(service_module, "_SERVICE_INSTANCES", {})
+    monkeypatch.setattr(service_module, "_RELOCATED_SECRET_ROOTS", set())
+
+    secrets_root = paths_module.owner_secrets_dir(LOCAL_ADMIN_ID)
+    store = CodexCredentialStore(secrets_root)
+    committed = store.commit_credentials(
+        _stored_credentials(expires_at=4_000_000_000),
+        expected_generation=0,
+    )
+    model_catalog = ModelCatalogService(
+        path=paths_module.get_admin_path_service().get_settings_file("model_catalog")
+    )
+    sync_codex_catalog(
+        model_catalog,
+        _snapshot(
+            "live",
+            _model("gpt-5.6-luna", supported_reasoning_levels=("max",)),
+        ),
+        account_id=committed.account_id,
+        deployment_owner_user_id="u-owner",
+    )
+    expected = CodexOAuthService(
+        store,
+        FakeCatalog(_snapshot("live", _model("gpt-5.6-luna"))),
+        model_catalog,
+        oauth_client=FakeOAuthClient(),
+    )
+    service_module._SERVICE_INSTANCES[str(secrets_root)] = expected
+
+    learner_scope = UserScope(
+        kind="user",
+        user_id="u_ada",
+        root=admin_root / "users" / "u_ada",
+    )
+    token = set_current_user(
+        CurrentUser(id="u_ada", username="ada", role="user", scope=learner_scope)
+    )
+    try:
+        resolved = service_module.get_codex_deployment_runtime_service()
+        codex_token = await resolved.get_token()
+        resolved.validate_runtime_profile(codex_token, "gpt-5.6-luna", "max")
+    finally:
+        reset_current_user(token)
+
+    assert resolved is expected
+    assert codex_token.account_id == committed.account_id
+    assert not (admin_root / "system" / "user-secrets" / "u_ada").exists()
+
+
 def _model(
     slug: str,
     *,
@@ -935,6 +999,7 @@ async def test_successful_live_login_keeps_the_existing_model_selection(
     assert status["active_model"] is None
     assert status["activated"] is False
     assert _selection(model_catalog.load()) == original_selection
+    assert model_catalog.load()["deployment_owner_user_id"] == "local-admin"
     assert started["callback_port"] == 1455
     assert started["callback_forward_port"] == 4782
     assert started["redirect_uri"] == "http://localhost:1455/auth/callback"
@@ -950,6 +1015,54 @@ async def test_successful_live_login_keeps_the_existing_model_selection(
         "redirect_uri",
         "ssh_forward_command",
     }
+
+
+@pytest.mark.asyncio
+async def test_first_pocketbase_admin_claims_pending_login_before_operation_is_shared(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed or pending login is still an explicit, durable owner claim."""
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user, set_current_user
+    from deeptutor.multi_user.models import CurrentUser, UserScope
+    from deeptutor.services import auth as auth_service
+
+    service, _callback, _oauth, _catalog, _store, model_catalog = await _oauth_service(tmp_path)
+    monkeypatch.setattr(auth_service, "POCKETBASE_ENABLED", True)
+    monkeypatch.setattr(model_access, "load_users", lambda: {})
+    first = CurrentUser(
+        id="pb_owner",
+        username="owner@example.test",
+        role="admin",
+        scope=UserScope(kind="admin", user_id="pb_owner", root=tmp_path / "owner"),
+    )
+    second = CurrentUser(
+        id="pb_second",
+        username="second@example.test",
+        role="admin",
+        scope=UserScope(kind="admin", user_id="pb_second", root=tmp_path / "second"),
+    )
+
+    first_token = set_current_user(first)
+    try:
+        started = await service.start_login()
+    finally:
+        reset_current_user(first_token)
+
+    second_token = set_current_user(second)
+    try:
+        with pytest.raises(CodexAuthError) as exc_info:
+            await service.start_login()
+    finally:
+        reset_current_user(second_token)
+
+    assert exc_info.value.code == "deployment_owner_changed"
+    assert exc_info.value.http_status == 409
+    assert model_catalog.load()["deployment_owner_user_id"] == first.id
+    assert service.public_status()["operation_id"] == started["operation_id"]
+    await service.cancel_login()
+    assert model_catalog.load()["deployment_owner_user_id"] == first.id
 
 
 @pytest.mark.asyncio

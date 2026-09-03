@@ -5,16 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 from fastapi.testclient import TestClient
+import pytest
 
 
 @pytest.fixture()
 def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DEEPTUTOR_HOME", str(tmp_path))
     # Import after HOME is set so auth secret / users land under tmp_path.
-    from deeptutor.services import auth as auth_service
     from deeptutor.api.routers import auth as auth_router
+    from deeptutor.services import auth as auth_service
     from deeptutor.services.config import ensure_runtime_settings_files
 
     ensure_runtime_settings_files()

@@ -23,7 +23,6 @@ gets counted against the budget.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import logging
 
 from deeptutor.services.memory import paths
 from deeptutor.services.memory import snapshot as snap
@@ -55,8 +54,6 @@ from deeptutor.services.memory.document import Document, Entry
 from deeptutor.services.memory.paths import L3Slot, Surface
 from deeptutor.services.memory.settings import load_memory_settings
 from deeptutor.services.memory.snapshot.entity import Entity
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -90,13 +87,8 @@ async def run_audit(
     settings = load_memory_settings()
     token = None
     if llm_selection:
-        try:
-            _config, token = activate_llm_selection(llm_selection)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "memory audit: ignoring unresolvable llm_selection %s: %s", llm_selection, exc
-            )
-            token = None
+        # Do not replace a revoked queued selection with the global model.
+        _config, token = activate_llm_selection(llm_selection)
     try:
         if layer == "L2":
             return await _run_audit_l2(

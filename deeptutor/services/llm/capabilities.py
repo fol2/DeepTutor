@@ -34,6 +34,21 @@ PROVIDER_CAPABILITIES: dict[str, dict[str, object]] = {
     "openai_codex": {
         "supports_vision": True,
     },
+    # Both subscription adapters deliberately run as text-only completions.
+    "cursor_subscription": {
+        "supports_response_format": False,
+        "supports_streaming": True,
+        "supports_tools": False,
+        "supports_vision": False,
+        "system_in_messages": True,
+    },
+    "grok_subscription": {
+        "supports_response_format": False,
+        "supports_streaming": True,
+        "supports_tools": False,
+        "supports_vision": False,
+        "system_in_messages": True,
+    },
     # Custom / user-defined OpenAI-compatible endpoints
     "custom": {
         "supports_response_format": True,

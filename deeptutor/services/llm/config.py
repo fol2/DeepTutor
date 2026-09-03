@@ -36,6 +36,8 @@ class LLMConfigUpdate(TypedDict, total=False):
     binding: str
     provider_name: str
     provider_mode: str
+    profile_id: str | None
+    model_id: str | None
     api_version: str | None
     extra_headers: dict[str, str]
     reasoning_effort: str | None
@@ -107,6 +109,8 @@ class LLMConfig:
     binding: str = "openai"
     provider_name: str = "routing"
     provider_mode: str = "standard"
+    profile_id: str | None = None
+    model_id: str | None = None
     api_version: str | None = None
     extra_headers: dict[str, str] | None = None
     reasoning_effort: str | None = None
@@ -174,7 +178,12 @@ def _get_llm_config_from_resolver() -> LLMConfig:
         raise LLMConfigError(
             "No active LLM model is configured. Please set it in Settings > Catalog."
         )
-    if not resolved.effective_url and resolved.provider_mode != "oauth":
+    spec = find_by_name(resolved.provider_name)
+    if (
+        not resolved.effective_url
+        and resolved.provider_mode != "oauth"
+        and (spec is None or spec.requires_api_base)
+    ):
         raise LLMConfigError(
             "No effective LLM endpoint resolved. Please configure base_url or provider defaults."
         )
@@ -196,6 +205,8 @@ def _get_llm_config_from_resolver() -> LLMConfig:
         binding=resolved.binding,
         provider_name=resolved.provider_name,
         provider_mode=resolved.provider_mode,
+        profile_id=resolved.profile_id,
+        model_id=resolved.model_id,
         api_version=resolved.api_version,
         extra_headers=resolved.extra_headers,
         reasoning_effort=resolved.reasoning_effort,

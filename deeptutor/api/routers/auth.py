@@ -214,9 +214,7 @@ def _extract_token(authorization: str | None, dt_token: str | None) -> str | Non
 def _access_email_from_headers(headers) -> str | None:
     """Read Cloudflare Access identity email from request/WebSocket headers."""
     try:
-        raw = headers.get(_ACCESS_EMAIL_HEADER) or headers.get(
-            "Cf-Access-Authenticated-User-Email"
-        )
+        raw = headers.get(_ACCESS_EMAIL_HEADER) or headers.get("Cf-Access-Authenticated-User-Email")
     except Exception:
         return None
     if isinstance(raw, (list, tuple)):
@@ -227,9 +225,7 @@ def _access_email_from_headers(headers) -> str | None:
 
 def _access_assertion_present(headers) -> bool:
     try:
-        raw = headers.get("cf-access-jwt-assertion") or headers.get(
-            "Cf-Access-Jwt-Assertion"
-        )
+        raw = headers.get("cf-access-jwt-assertion") or headers.get("Cf-Access-Jwt-Assertion")
     except Exception:
         return False
     if isinstance(raw, (list, tuple)):
@@ -308,9 +304,7 @@ async def require_auth(
     request: Request,
     authorization: str | None = Header(default=None, alias="Authorization"),
     dt_token: str | None = Cookie(default=None, alias=_COOKIE_NAME),
-    access_email: str | None = Header(
-        default=None, alias="Cf-Access-Authenticated-User-Email"
-    ),
+    access_email: str | None = Header(default=None, alias="Cf-Access-Authenticated-User-Email"),
 ) -> TokenPayload | None:
     """
     FastAPI dependency that enforces authentication when AUTH_ENABLED=true.
@@ -481,9 +475,7 @@ async def auth_status(
     request: Request,
     authorization: str | None = Header(default=None, alias="Authorization"),
     dt_token: str | None = Cookie(default=None, alias=_COOKIE_NAME),
-    access_email: str | None = Header(
-        default=None, alias="Cf-Access-Authenticated-User-Email"
-    ),
+    access_email: str | None = Header(default=None, alias="Cf-Access-Authenticated-User-Email"),
 ) -> AuthStatusResponse:
     """Return whether auth is enabled and whether the current request is authenticated."""
     if not AUTH_ENABLED:
@@ -520,9 +512,7 @@ async def auth_status(
 async def sso_cloudflare_access(
     request: Request,
     next: str = "/",
-    access_email: str | None = Header(
-        default=None, alias="Cf-Access-Authenticated-User-Email"
-    ),
+    access_email: str | None = Header(default=None, alias="Cf-Access-Authenticated-User-Email"),
 ):
     """Exchange a Cloudflare Access identity header for a DeepTutor session cookie.
 
