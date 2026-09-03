@@ -51,6 +51,11 @@ from deeptutor.multi_user.knowledge_access import (
 from deeptutor.multi_user.knowledge_access import (
     list_visible_knowledge_bases as list_visible_kb_access,
 )
+from deeptutor.multi_user.model_access import (
+    allowed_llm_options,
+    apply_allowed_llm_selection,
+    is_deployment_owner,
+)
 from deeptutor.services.config import PROJECT_ROOT, load_config_with_main
 from deeptutor.services.file_io import atomic_write_json
 from deeptutor.services.rag.factory import (
@@ -1447,6 +1452,25 @@ def _model_options_payload(kinds: list[str]) -> dict:
     out: dict = {}
     for kind in kinds:
         svc = services.get(kind) or {}
+        if kind == "llm":
+            allowed = allowed_llm_options(catalog)
+            out[kind] = {
+                "active": allowed.get("active"),
+                "options": [
+                    {
+                        "profile_id": option.get("profile_id"),
+                        "profile_name": option.get("profile_name"),
+                        "model_id": option.get("model_id"),
+                        "label": option.get("model_name")
+                        or option.get("label")
+                        or option.get("model_id"),
+                        "model": option.get("model") or "",
+                        "detail": "",
+                    }
+                    for option in allowed.get("options", [])
+                ],
+            }
+            continue
         options = []
         for profile in svc.get("profiles", []) or []:
             pid = profile.get("id")
@@ -1539,11 +1563,29 @@ async def set_rag_active_model(payload: ActiveModelUpdate):
             status_code=400,
             detail=f"Unsupported model kind '{payload.kind}'. Choose one of: {', '.join(_ENGINE_MODEL_KINDS)}.",
         )
+    actor = get_current_user()
+    if not actor.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Global model selection is managed by the deployment owner.",
+        )
     try:
         from deeptutor.services.config import get_model_catalog_service
 
         service = get_model_catalog_service()
         catalog = service.load()
+        if payload.kind == "llm":
+            if not is_deployment_owner(actor, catalog):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Global LLM selection is managed by the deployment owner.",
+                )
+            try:
+                apply_allowed_llm_selection(
+                    {"profile_id": payload.profile_id, "model_id": payload.model_id}
+                )
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
         svc = (catalog.get("services") or {}).get(payload.kind)
         if not svc:
             raise HTTPException(status_code=404, detail=f"No '{payload.kind}' models configured.")
