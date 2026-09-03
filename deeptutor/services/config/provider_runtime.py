@@ -629,14 +629,10 @@ def _load_catalog(catalog: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _with_personal_llm_profiles(catalog: dict[str, Any]) -> dict[str, Any]:
-    """Add the current owner's own owner-bound LLM profiles to *catalog*.
+    """Apply the legacy personal-profile compatibility hook.
 
-    An ordinary user's Codex profile lives in their own catalog rather than
-    the shared one (see :mod:`deeptutor.multi_user.personal_models`), so
-    resolving a personal selection against the shared catalog alone would
-    fail to find the profile it names. Imported lazily and guarded: the LLM
-    layer must keep resolving in contexts where multi-user state is absent
-    (CLI, tests, background jobs).
+    Per-user subscription profiles are no longer admitted; the hook remains
+    for compatibility and returns the shared catalogue unchanged.
     """
     try:
         from deeptutor.multi_user.personal_models import merge_personal_llm_profiles

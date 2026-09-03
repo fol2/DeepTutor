@@ -67,6 +67,7 @@ class _LoginOperation:
     authorize_url: str
     deadline: float
     expected_generation: int
+    deployment_owner_user_id: str
     operation_state: str = "waiting"
     error_code: str | None = None
     activated: bool = False
@@ -93,6 +94,20 @@ def _stale_codex_config() -> CodexAuthError:
 
 def _codex_account_binding(account_id: str) -> str:
     return hashlib.sha256(account_id.encode("utf-8")).hexdigest()
+
+
+def _claim_deployment_owner(catalog: dict[str, Any], user_id: str) -> None:
+    """Claim owner-only provider state without releasing it on login failure."""
+    from deeptutor.multi_user.model_access import DEPLOYMENT_OWNER_ID_FIELD
+
+    current_owner_user_id = str(catalog.get(DEPLOYMENT_OWNER_ID_FIELD) or "")
+    if current_owner_user_id and current_owner_user_id != user_id:
+        raise CodexAuthError(
+            "deployment_owner_changed",
+            "The deployment owner changed before Codex sign-in completed.",
+            409,
+        )
+    catalog[DEPLOYMENT_OWNER_ID_FIELD] = user_id
 
 
 def _managed_model(
@@ -137,9 +152,8 @@ def _managed_profile(
         "extra_headers": {},
         "managed_by": MANAGED_BY,
         "read_only": True,
-        # A Codex token authorizes exactly one person's ChatGPT plan, so this
-        # profile stays with the operator who signed in and is never shared with
-        # other users through grants (see deeptutor/multi_user/model_access.py).
+        # A Codex token authorises exactly one person's account, so this
+        # deployment-owner profile is never shared through grants.
         "owner_bound": True,
         "models": [_managed_model(model, overrides.get(model.slug)) for model in snapshot.models],
     }
@@ -248,6 +262,7 @@ def sync_codex_catalog(
     snapshot: CatalogSnapshot,
     *,
     account_id: str | None = None,
+    deployment_owner_user_id: str | None = None,
 ) -> CatalogSyncResult:
     """Publish the managed Codex profile into the shared model catalog.
 
@@ -260,6 +275,8 @@ def sync_codex_catalog(
 
     def mutate(catalog: dict[str, Any]) -> None:
         nonlocal activated
+        if deployment_owner_user_id is not None:
+            _claim_deployment_owner(catalog, deployment_owner_user_id)
         llm = catalog["services"]["llm"]
         profiles = llm.setdefault("profiles", [])
         # OAuth refreshes rebuild managed profiles, so preserve only the user-selected
@@ -376,6 +393,17 @@ class CodexOAuthService:
         )
 
     async def start_login(self) -> dict[str, Any]:
+        from deeptutor.multi_user.context import get_current_user
+
+        deployment_owner_user_id = get_current_user().id
+        # Claim before inspecting the shared active operation. Otherwise two
+        # PocketBase admins that both passed the empty-catalogue route gate can
+        # share an authorisation URL. The claim intentionally survives callback
+        # setup, OAuth, cancellation, and timeout failures: subscription-owner
+        # identity is explicit deployment state, not a transient login lease.
+        self._model_catalog.update(
+            lambda catalog: _claim_deployment_owner(catalog, deployment_owner_user_id)
+        )
         async with self._operation_lock:
             if self._operation_is_active():
                 return self._login_start_payload(self._operation)
@@ -397,6 +425,7 @@ class CodexOAuthService:
                 ),
                 deadline=self._clock() + CODEX_LOGIN_TIMEOUT_SECONDS,
                 expected_generation=self._store.current_generation(),
+                deployment_owner_user_id=deployment_owner_user_id,
             )
             self._operation = operation
             operation.task = asyncio.create_task(self._run_login(operation))
@@ -509,6 +538,7 @@ class CodexOAuthService:
                     self._model_catalog,
                     snapshot,
                     account_id=committed.account_id,
+                    deployment_owner_user_id=operation.deployment_owner_user_id,
                 )
             self._last_snapshot = snapshot
             operation.activated = sync_result.activated
@@ -568,6 +598,8 @@ class CodexOAuthService:
         return self.public_status()
 
     async def refresh_models(self) -> dict[str, Any]:
+        from deeptutor.multi_user.context import get_current_user
+
         async with self._catalog_sync_lock:
             token = await self.get_token()
             credentials = self._store.load_credentials()
@@ -582,6 +614,7 @@ class CodexOAuthService:
                 self._model_catalog,
                 snapshot,
                 account_id=credentials.account_id,
+                deployment_owner_user_id=get_current_user().id,
             )
             self._last_snapshot = snapshot
             return self.public_status()
@@ -1017,12 +1050,8 @@ _RELOCATED_SECRET_ROOTS: set[str] = set()
 def _codex_user_root() -> Path:
     """Resolve the user root of the account that owns the caller's scope.
 
-    A Codex token is issued against one person's ChatGPT plan. Resolving other
-    users to the administrator's root would run a whole deployment on a single
-    subscription, so every account signs in for itself or does not use Codex.
-    Owner resolution is what keeps that true while still letting a partner —
-    a synthetic user with a workspace but no account — inherit the login of
-    the person who owns it (#711).
+    The lifecycle route admits only the deployment owner. Owner resolution is
+    retained for CLI/background compatibility and credential relocation.
 
     This is where the store used to live; :func:`_codex_secrets_root` is where
     it lives now, and this is only the location it is relocated from.
@@ -1110,13 +1139,8 @@ def _relocate_legacy_store(user_root: Path, secrets_root: Path) -> bool:
 def _owner_model_catalog_service() -> ModelCatalogService:
     """The catalog a sign-in publishes its managed profile into.
 
-    Deliberately NOT :func:`get_model_catalog_service`, which resolves an
-    ordinary user to the *administrator's* catalog: a non-admin sign-in would
-    then write their personal Codex profile into the shared catalog, where it
-    would show up in the administrator's model list and in every other user's
-    resolution path. Owner scope keys this to the same account as the
-    credential store, so a login and its profile can never land in different
-    places (#781).
+    The settings route admits only the deployment owner. Using the same owner
+    path helper as the credential store keeps CLI and request contexts aligned.
     """
     from deeptutor.multi_user.personal_models import owner_catalog_service
 

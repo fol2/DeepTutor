@@ -237,6 +237,41 @@ class RunStartRequest(BaseModel):
     llm_selection: LLMSelectionPayload | None = None
 
 
+def _authorise_run_llm(req: RunStartRequest) -> RunStartRequest:
+    """Resolve one request-authorised model before a background run starts."""
+    if req.mode == "merge":
+        return req
+    from deeptutor.multi_user.context import get_current_user
+    from deeptutor.multi_user.model_access import (
+        allowed_llm_options,
+        apply_allowed_llm_selection,
+    )
+
+    selection = (
+        {"profile_id": req.llm_selection.profile_id, "model_id": req.llm_selection.model_id}
+        if req.llm_selection
+        else None
+    )
+    try:
+        selection = apply_allowed_llm_selection(selection)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
+    if selection is None and not get_current_user().is_admin:
+        options = allowed_llm_options().get("options", [])
+        if not options:
+            raise HTTPException(
+                status_code=403,
+                detail="No LLM model is assigned to your account.",
+            )
+        selection = {
+            "profile_id": str(options[0].get("profile_id") or ""),
+            "model_id": str(options[0].get("model_id") or ""),
+        }
+    if selection is None:
+        return req
+    return req.model_copy(update={"llm_selection": LLMSelectionPayload.model_validate(selection)})
+
+
 def _runner_for(req: RunStartRequest):
     """Return an ``async on_event → None`` runner for the requested mode."""
     from deeptutor.services.memory.consolidator import (
@@ -319,6 +354,7 @@ async def start_run(req: RunStartRequest):
             status_code=405,
             detail="preferences is written by the write_memory tool, not consolidated",
         )
+    req = _authorise_run_llm(req)
     from deeptutor.services.memory.consolidator.runs import (
         RunBusyError,
         get_run_manager,
@@ -538,6 +574,7 @@ async def update_doc(layer: str, key: str, payload: UpdateRequest | None = None)
         budget=payload.budget if payload else None,
         llm_selection=payload.llm_selection if payload else None,
     )
+    req = _authorise_run_llm(req)
     return _legacy_run_stream(req)
 
 
@@ -553,6 +590,7 @@ async def audit_doc(layer: str, key: str, payload: AuditRequest | None = None):
         budget=payload.budget if payload else None,
         llm_selection=payload.llm_selection if payload else None,
     )
+    req = _authorise_run_llm(req)
     return _legacy_run_stream(req)
 
 
@@ -568,6 +606,7 @@ async def dedup_doc(layer: str, key: str, payload: DedupRequest | None = None):
         iterations=payload.iterations if payload else None,
         llm_selection=payload.llm_selection if payload else None,
     )
+    req = _authorise_run_llm(req)
     return _legacy_run_stream(req)
 
 

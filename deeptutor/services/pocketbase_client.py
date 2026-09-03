@@ -152,7 +152,11 @@ def validate_pb_token(token: str) -> dict[str, Any] | None:
         )
         role = str(getattr(record, "role", "user") or "user")
 
-        payload = {"username": str(username), "role": role}
+        payload = {
+            "id": str(getattr(record, "id", "") or ""),
+            "username": str(username),
+            "role": role,
+        }
         _TOKEN_CACHE[token] = (payload, now + _TOKEN_CACHE_TTL)
         return payload
 

@@ -10,27 +10,50 @@ from deeptutor.services.cron.executor import _current_user_for_chat_owner
 from deeptutor.services.cron.service import CronJob, CronOwner, CronSchedule
 
 
-def test_admin_owner_identity_is_preserved_for_scheduled_chat() -> None:
+@pytest.mark.asyncio
+async def test_admin_owner_identity_is_preserved_for_scheduled_chat(monkeypatch) -> None:
+    from deeptutor.multi_user import identity
+
+    monkeypatch.setattr(
+        identity,
+        "get_user_by_id",
+        lambda _user_id: ("owner@example.com", {"id": "admin-account-7", "role": "admin"}),
+    )
     owner = CronOwner(kind="chat", user_id="admin-account-7", is_admin=True)
 
-    user = _current_user_for_chat_owner(owner)
+    user = await _current_user_for_chat_owner(owner)
 
+    assert user is not None
     assert user.id == "admin-account-7"
-    assert user.username == "admin-account-7"
+    assert user.username == "owner@example.com"
     assert user.role == "admin"
     assert user.scope.kind == "admin"
     assert user.scope.user_id == "admin-account-7"
     assert user.scope.root == admin_scope().root
 
 
-def test_ordinary_owner_identity_and_scope_are_preserved_for_scheduled_chat() -> None:
+@pytest.mark.asyncio
+async def test_ordinary_owner_identity_and_scope_are_preserved_for_scheduled_chat(
+    monkeypatch,
+) -> None:
+    from deeptutor.multi_user import identity
+
+    monkeypatch.setattr(
+        identity,
+        "get_user_by_id",
+        lambda _user_id: (
+            "learner@example.com",
+            {"id": "learner-account-4", "role": "user"},
+        ),
+    )
     owner = CronOwner(kind="chat", user_id="learner-account-4", is_admin=False)
 
-    user = _current_user_for_chat_owner(owner)
+    user = await _current_user_for_chat_owner(owner)
 
+    assert user is not None
     expected_scope = scope_for_user("learner-account-4", is_admin=False)
     assert user.id == "learner-account-4"
-    assert user.username == "learner-account-4"
+    assert user.username == "learner@example.com"
     assert user.role == "user"
     assert user.scope == expected_scope
 
@@ -38,6 +61,14 @@ def test_ordinary_owner_identity_and_scope_are_preserved_for_scheduled_chat() ->
 @pytest.mark.asyncio
 async def test_scheduled_chat_runs_inside_actual_admin_owner_context(monkeypatch) -> None:
     observed_users = []
+
+    from deeptutor.multi_user import identity
+
+    monkeypatch.setattr(
+        identity,
+        "get_user_by_id",
+        lambda _user_id: ("owner@example.com", {"id": "admin-account-7", "role": "admin"}),
+    )
 
     class FakeStore:
         async def get_session(self, _session_id):
@@ -85,3 +116,52 @@ async def test_scheduled_chat_runs_inside_actual_admin_owner_context(monkeypatch
     assert len(observed_users) == 1
     assert observed_users[0].id == "admin-account-7"
     assert observed_users[0].scope.user_id == "admin-account-7"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_admin_demotion_uses_current_ordinary_user_role(monkeypatch) -> None:
+    from deeptutor.multi_user import identity
+
+    monkeypatch.setattr(
+        identity,
+        "get_user_by_id",
+        lambda _user_id: ("former@example.com", {"id": "former-owner", "role": "user"}),
+    )
+    persisted_owner = CronOwner(kind="chat", user_id="former-owner", is_admin=True)
+
+    user = await _current_user_for_chat_owner(persisted_owner)
+
+    assert user is not None
+    assert user.role == "user"
+    assert user.scope.kind == "user"
+
+
+@pytest.mark.asyncio
+async def test_deleted_scheduled_owner_is_skipped_before_turn_execution(monkeypatch) -> None:
+    from deeptutor.multi_user import identity
+    import deeptutor.runtime.orchestrator as orchestrator_module
+
+    monkeypatch.setattr(identity, "get_user_by_id", lambda _user_id: None)
+
+    class UnexpectedOrchestrator:
+        def __init__(self):
+            raise AssertionError("orchestrator must not start for a deleted owner")
+
+    monkeypatch.setattr(orchestrator_module, "ChatOrchestrator", UnexpectedOrchestrator)
+    job = CronJob(
+        id="deleted-owner",
+        name="Deleted owner",
+        message="Do not run",
+        schedule=CronSchedule(kind="every", every_seconds=3600),
+        owner=CronOwner(
+            kind="chat",
+            user_id="deleted-owner-id",
+            is_admin=True,
+            session_id="session-1",
+        ),
+    )
+
+    assert await executor.execute_job(job) == (
+        "skipped",
+        "owner account is unavailable",
+    )

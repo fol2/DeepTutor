@@ -1093,7 +1093,16 @@ class TurnRuntimeManager:
             )
 
             current_user = get_current_user()
-            if not current_user.is_admin:
+            if current_user.is_admin:
+                try:
+                    from deeptutor.multi_user.model_access import (
+                        apply_allowed_llm_selection,
+                    )
+
+                    apply_allowed_llm_selection(None)
+                except PermissionError as exc:
+                    raise RuntimeError(str(exc)) from exc
+            else:
                 # Single gate, shared with the frontend lock and any HTTP
                 # surface: no usable LLM grant → a clear terminal error here
                 # instead of a silent fall-through to the global client.
@@ -1120,10 +1129,9 @@ class TurnRuntimeManager:
             )
 
             try:
-                # Personal (owner-bound) profiles live in the user's own
-                # catalog, so validating against the shared one alone would
-                # reject a Codex model the user signed in for themselves —
-                # the same merge the resolution path performs (#781).
+                # The compatibility hook deliberately ignores legacy per-user
+                # subscription profiles; only the deployment owner's shared
+                # catalogue can contain one now.
                 apply_llm_selection_to_catalog(
                     merge_personal_llm_profiles(get_model_catalog_service().load()),
                     LLMSelection.from_payload(llm_selection),

@@ -254,6 +254,17 @@ class TestChannelOnboarding:
         # route from a merely authenticated one.
         monkeypatch.setattr(auth_service, "AUTH_SECRET", "test-secret")
         monkeypatch.setattr(auth_service, "POCKETBASE_ENABLED", False)
+        monkeypatch.setattr(
+            auth_service,
+            "_load_users",
+            lambda: {
+                "not-an-admin": {
+                    "id": "u-1",
+                    "role": "user",
+                    "disabled": False,
+                }
+            },
+        )
         token = auth_service.create_token("not-an-admin", role="user", user_id="u-1")
         # No context manager: this must not run the app's lifespan.
         client = TestClient(api_main.app)

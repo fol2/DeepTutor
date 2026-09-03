@@ -935,6 +935,7 @@ async def test_successful_live_login_keeps_the_existing_model_selection(
     assert status["active_model"] is None
     assert status["activated"] is False
     assert _selection(model_catalog.load()) == original_selection
+    assert model_catalog.load()["deployment_owner_user_id"] == "local-admin"
     assert started["callback_port"] == 1455
     assert started["callback_forward_port"] == 4782
     assert started["redirect_uri"] == "http://localhost:1455/auth/callback"
@@ -950,6 +951,54 @@ async def test_successful_live_login_keeps_the_existing_model_selection(
         "redirect_uri",
         "ssh_forward_command",
     }
+
+
+@pytest.mark.asyncio
+async def test_first_pocketbase_admin_claims_pending_login_before_operation_is_shared(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed or pending login is still an explicit, durable owner claim."""
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user, set_current_user
+    from deeptutor.multi_user.models import CurrentUser, UserScope
+    from deeptutor.services import auth as auth_service
+
+    service, _callback, _oauth, _catalog, _store, model_catalog = await _oauth_service(tmp_path)
+    monkeypatch.setattr(auth_service, "POCKETBASE_ENABLED", True)
+    monkeypatch.setattr(model_access, "load_users", lambda: {})
+    first = CurrentUser(
+        id="pb_owner",
+        username="owner@example.test",
+        role="admin",
+        scope=UserScope(kind="admin", user_id="pb_owner", root=tmp_path / "owner"),
+    )
+    second = CurrentUser(
+        id="pb_second",
+        username="second@example.test",
+        role="admin",
+        scope=UserScope(kind="admin", user_id="pb_second", root=tmp_path / "second"),
+    )
+
+    first_token = set_current_user(first)
+    try:
+        started = await service.start_login()
+    finally:
+        reset_current_user(first_token)
+
+    second_token = set_current_user(second)
+    try:
+        with pytest.raises(CodexAuthError) as exc_info:
+            await service.start_login()
+    finally:
+        reset_current_user(second_token)
+
+    assert exc_info.value.code == "deployment_owner_changed"
+    assert exc_info.value.http_status == 409
+    assert model_catalog.load()["deployment_owner_user_id"] == first.id
+    assert service.public_status()["operation_id"] == started["operation_id"]
+    await service.cancel_login()
+    assert model_catalog.load()["deployment_owner_user_id"] == first.id
 
 
 @pytest.mark.asyncio

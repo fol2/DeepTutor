@@ -56,6 +56,21 @@ def _build_runtime_provider(llm_config: LLMConfig) -> LLMProvider:
         )
 
         provider: LLMProvider = OpenAICodexProvider(default_model=llm_config.model)
+    elif backend == "cursor_sdk":
+        from deeptutor.services.llm.provider_core.cursor_sdk_provider import (
+            CursorSDKProvider,
+        )
+
+        provider = CursorSDKProvider(
+            api_key=api_key or None,
+            default_model=llm_config.model,
+        )
+    elif backend == "grok_subscription":
+        from deeptutor.services.llm.provider_core.grok_subscription_provider import (
+            GrokSubscriptionProvider,
+        )
+
+        provider = GrokSubscriptionProvider()
     elif backend == "github_copilot":
         from deeptutor.services.llm.provider_core.github_copilot_provider import (
             GitHubCopilotProvider,
@@ -127,6 +142,9 @@ def get_runtime_provider(config: LLMConfig | None = None) -> LLMProvider:
     Calls made outside an event loop remain uncached for cross-loop safety.
     """
     llm_config = config or get_llm_config()
+    from deeptutor.multi_user.model_access import require_deployment_owner_binding
+
+    require_deployment_owner_binding(llm_config.provider_name or llm_config.binding)
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

@@ -34,7 +34,16 @@ from deeptutor.services.provider_registry import find_by_name, model_overrides_f
 # Providers that don't reliably support OpenAI function-calling. The loop
 # still runs without tool schemas — the model just produces prose.
 _NATIVE_TOOL_BLOCKED_BINDINGS: frozenset[str] = frozenset(
-    {"anthropic", "claude", "ollama", "lm_studio", "vllm", "llama_cpp"}
+    {
+        "anthropic",
+        "claude",
+        "cursor_subscription",
+        "grok_subscription",
+        "ollama",
+        "lm_studio",
+        "vllm",
+        "llama_cpp",
+    }
 )
 
 # Native provider adapters whose backends speak OpenAI-style function calling
@@ -189,6 +198,9 @@ def build_openai_client(config: LLMClientConfig) -> Any:
     handle itself owns an HTTP connection pool, so reusing it is both faster
     and prevents a new allocator/socket high-water mark on every turn.
     """
+    from deeptutor.multi_user.model_access import require_deployment_owner_binding
+
+    require_deployment_owner_binding(config.binding)
     disable_ssl_verify = bool(load_system_settings()["disable_ssl_verify"])
     try:
         loop = asyncio.get_running_loop()
@@ -257,10 +269,30 @@ def _build_codex_adapter(config: LLMClientConfig, spec: Any) -> Any:
     from deeptutor.services.codex_auth.constants import CODEX_DEFAULT_MODEL_ID
     from deeptutor.services.llm.provider_core import OpenAICodexProvider
 
+    del spec
     oauth_provider = OpenAICodexProvider(
         default_model=config.model or CODEX_DEFAULT_MODEL_ID,
     )
     return _ProviderOpenAIAdapter(oauth_provider)
+
+
+def _build_cursor_adapter(config: LLMClientConfig, spec: Any) -> Any:
+    del spec
+    from deeptutor.services.llm.provider_core import CursorSDKProvider
+
+    return _ProviderOpenAIAdapter(
+        CursorSDKProvider(
+            api_key=primary_api_key(config.api_key),
+            default_model=config.model,
+        )
+    )
+
+
+def _build_grok_subscription_adapter(config: LLMClientConfig, spec: Any) -> Any:
+    del config, spec
+    from deeptutor.services.llm.provider_core import GrokSubscriptionProvider
+
+    return _ProviderOpenAIAdapter(GrokSubscriptionProvider())
 
 
 def _build_copilot_adapter(config: LLMClientConfig, spec: Any) -> Any:
@@ -301,6 +333,8 @@ def _build_direct_openai_adapter(config: LLMClientConfig, spec: Any) -> Any:
 _NATIVE_ADAPTER_BUILDERS: dict[str, Callable[[LLMClientConfig, Any], Any]] = {
     "anthropic": _build_anthropic_adapter,
     "openai_codex": _build_codex_adapter,
+    "cursor_sdk": _build_cursor_adapter,
+    "grok_subscription": _build_grok_subscription_adapter,
     "github_copilot": _build_copilot_adapter,
     "codebuddy": _build_codebuddy_adapter,
 }

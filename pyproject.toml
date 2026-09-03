@@ -47,6 +47,7 @@ dependencies = [
     "dashscope>=1.14.0",
     "perplexityai>=0.1.0",
     "oauth-cli-kit>=0.1.1",
+    "cursor-sdk>=1.0.30,<1.1",
     "llama-index>=0.14.12",
     "llama-index-retrievers-bm25>=0.7.1,<0.8.0",
     # FAISS vector store: vectorized ANN retrieval that replaces SimpleVectorStore's
@@ -92,6 +93,7 @@ cli = [
     "dashscope>=1.14.0",
     "perplexityai>=0.1.0",
     "oauth-cli-kit>=0.1.1",
+    "cursor-sdk>=1.0.30,<1.1",
     "pageindex>=0.2.10,<0.3.0",
     # RAG (LlamaIndex)
     "llama-index>=0.14.12",

@@ -305,6 +305,93 @@ async def test_a_non_admin_can_still_write_a_personal_row(
     assert outcome.ok
 
 
+def _seed_owner_subscription_catalogue() -> dict[str, Any]:
+    return {
+        "deployment_owner_user_id": "u_owner",
+        "services": {
+            "llm": {
+                "active_profile_id": "p-cursor",
+                "active_model_id": "m-cursor",
+                "profiles": [
+                    {
+                        "id": "p-local",
+                        "name": "Local Qwen",
+                        "binding": "ollama",
+                        "models": [{"id": "m-local", "name": "Qwen", "model": "qwen3.5:4b"}],
+                    },
+                    {
+                        "id": "p-cursor",
+                        "name": "Cursor Ultra",
+                        "binding": "cursor_subscription",
+                        "models": [
+                            {
+                                "id": "m-cursor",
+                                "name": "Grok 4.6 High",
+                                "model": "cursor-grok-4.6-high",
+                            }
+                        ],
+                    },
+                ],
+            }
+        },
+    }
+
+
+def test_setup_model_choices_hide_owner_subscription_from_later_admin(
+    isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user, set_current_user
+    from deeptutor.multi_user.models import CurrentUser, UserScope
+    from deeptutor.services.config.model_catalog import get_model_catalog_service
+
+    catalog_service = get_model_catalog_service()
+    catalog_service.save(_seed_owner_subscription_catalogue())
+    monkeypatch.setattr(model_access, "admin_catalog", catalog_service.load)
+    actor = CurrentUser(
+        id="u_second",
+        username="second@example.com",
+        role="admin",
+        scope=UserScope("admin", "u_second", isolated_settings / "admin"),
+    )
+    token = set_current_user(actor)
+    try:
+        spec = setting_specs()["catalog.llm"]
+        assert [choice.value for choice in spec.choices()] == ["p-local::m-local"]
+        assert spec.read() == ""
+        with pytest.raises(PermissionError, match="deployment owner"):
+            spec.write("p-cursor::m-cursor")
+    finally:
+        reset_current_user(token)
+
+
+def test_setup_model_choices_hide_owner_subscription_from_ordinary_user(
+    isolated_settings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from deeptutor.multi_user import model_access
+    from deeptutor.multi_user.context import reset_current_user, set_current_user
+    from deeptutor.multi_user.models import CurrentUser, UserScope
+    from deeptutor.services.config.model_catalog import get_model_catalog_service
+
+    catalog_service = get_model_catalog_service()
+    catalog_service.save(_seed_owner_subscription_catalogue())
+    monkeypatch.setattr(model_access, "admin_catalog", catalog_service.load)
+    monkeypatch.setattr(model_access, "load_grant", lambda _user_id: {"models": {"llm": []}})
+    actor = CurrentUser(
+        id="u_child",
+        username="child@example.com",
+        role="user",
+        scope=UserScope("user", "u_child", isolated_settings / "child"),
+    )
+    token = set_current_user(actor)
+    try:
+        spec = setting_specs()["catalog.llm"]
+        assert spec.choices() == ()
+        assert spec.read() == ""
+    finally:
+        reset_current_user(token)
+
+
 @pytest.mark.asyncio
 async def test_a_partner_turn_is_refused_for_every_scope(
     isolated_settings: Path, monkeypatch: pytest.MonkeyPatch

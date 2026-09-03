@@ -28,6 +28,8 @@ import {
   isBoundManagedCodexProfile,
   isCodexOAuthProfile,
   isManagedCodexProfile,
+  subscriptionProviderDefaultModel,
+  subscriptionProviderFields,
 } from "./codex-profile";
 import {
   type CatalogModel,
@@ -106,6 +108,8 @@ export function ServiceConfigEditor({ service }: { service: ServiceName }) {
     activeProviderOption,
     activeProfile,
   );
+  const isFixedSubscriptionProvider =
+    subscriptionProviderDefaultModel(activeProviderValue) !== null;
 
   const [showApiKey, setShowApiKey] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -163,7 +167,9 @@ export function ServiceConfigEditor({ service }: { service: ServiceName }) {
       : null;
   const reasoningOptions =
     service === "llm" && activeModel
-      ? isManagedCodex
+      ? isFixedSubscriptionProvider
+        ? []
+        : isManagedCodex
         ? isBoundManagedCodex
           ? reasoningEffortOptionsFromSupportedLevels(
               activeModel.codex_supported_reasoning_levels ?? [],
@@ -303,18 +309,10 @@ export function ServiceConfigEditor({ service }: { service: ServiceName }) {
       );
     }
     return (
-      <div className="space-y-4">
-        <div className="rounded-xl border border-dashed border-[var(--border)] px-5 py-10 text-center text-[13px] text-[var(--muted-foreground)]">
-          {t(
-            "Model endpoints are assigned by your administrator. You can still personalize theme and language here.",
-          )}
-        </div>
-        {/* One thing an ordinary user CAN configure for themselves: an
-            owner-bound Codex login. It authenticates their own ChatGPT plan,
-            so it is never something an administrator can grant them — the
-            account has to sign in for itself (#781). The card talks only to
-            the per-user OAuth endpoints and exposes no catalog. */}
-        {service === "llm" && <CodexOAuthCard />}
+      <div className="rounded-xl border border-dashed border-[var(--border)] px-5 py-10 text-center text-[13px] text-[var(--muted-foreground)]">
+        {t(
+          "Model endpoints are assigned by your administrator. You can still personalize theme and language here.",
+        )}
       </div>
     );
   }
@@ -489,10 +487,15 @@ export function ServiceConfigEditor({ service }: { service: ServiceName }) {
                 supportedSearchProviderNames={supportedSearchProviderNames}
                 onProviderChanged={(provider, previousProvider) => {
                   if (service !== "llm" || !activeProfile) return;
-                  const crossesCodeBuddyBoundary =
+                  const subscriptionModel = subscriptionProviderDefaultModel(
+                    provider.value,
+                  );
+                  const crossesFixedProviderBoundary =
                     provider.value === "codebuddy" ||
-                    previousProvider === "codebuddy";
-                  if (crossesCodeBuddyBoundary) {
+                    previousProvider === "codebuddy" ||
+                    subscriptionModel !== null ||
+                    subscriptionProviderDefaultModel(previousProvider) !== null;
+                  if (crossesFixedProviderBoundary) {
                     const profileId = activeProfile.id;
                     mutateCatalog((next) => {
                       const target = next.services.llm;
@@ -507,6 +510,17 @@ export function ServiceConfigEditor({ service }: { service: ServiceName }) {
                         return;
                       }
                       const modelId = `llm-model-${Date.now()}`;
+                      if (subscriptionModel) {
+                        profile.models = [
+                          {
+                            id: modelId,
+                            name: subscriptionModel.name,
+                            model: subscriptionModel.model,
+                          },
+                        ];
+                        target.active_model_id = modelId;
+                        return;
+                      }
                       profile.models = [
                         {
                           id: modelId,
@@ -534,7 +548,7 @@ export function ServiceConfigEditor({ service }: { service: ServiceName }) {
                   <div className="text-[13px] font-medium text-[var(--foreground)]">
                     {t("Models")}
                   </div>
-                  {!isCodexOAuth && (
+                  {!isCodexOAuth && !isFixedSubscriptionProvider && (
                     <div className="flex items-center gap-2">
                       {service === "llm" &&
                         activeProfile.binding === "codebuddy" && (
@@ -587,7 +601,9 @@ export function ServiceConfigEditor({ service }: { service: ServiceName }) {
                               : "";
                       return (
                         <div key={model.id} className="min-w-0">
-                          {editingModelId === model.id && !isCodexOAuth ? (
+                          {editingModelId === model.id &&
+                          !isCodexOAuth &&
+                          !isFixedSubscriptionProvider ? (
                             <input
                               autoFocus
                               className="h-8 w-60 rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12.5px] text-[var(--foreground)] outline-none focus:border-[var(--ring)]"
@@ -617,10 +633,14 @@ export function ServiceConfigEditor({ service }: { service: ServiceName }) {
                                 })
                               }
                               onDoubleClick={() => {
-                                if (!isCodexOAuth) startModelRename(model);
+                                if (
+                                  !isCodexOAuth &&
+                                  !isFixedSubscriptionProvider
+                                )
+                                  startModelRename(model);
                               }}
                               title={
-                                isCodexOAuth
+                                isCodexOAuth || isFixedSubscriptionProvider
                                   ? undefined
                                   : t("Double-click to rename")
                               }
@@ -662,6 +682,7 @@ export function ServiceConfigEditor({ service }: { service: ServiceName }) {
                         <input
                           className={inputClass}
                           value={activeModel.model}
+                          readOnly={isFixedSubscriptionProvider}
                           onChange={(e) =>
                             updateModelField(service, "model", e.target.value)
                           }
@@ -1203,13 +1224,17 @@ function ProfileFields({
     profile,
   );
   const isCodeBuddyAuth = service === "llm" && providerValue === "codebuddy";
+  const subscriptionFields = subscriptionProviderFields(
+    service,
+    providerValue,
+  );
 
-  const fields =
-    isCodexOAuth || isCodeBuddyAuth
-      ? { apiKey: false, baseUrl: false, baseUrlRequired: false }
-      : service === "search"
+  const fields = isManagedCodex || isCodexOAuth || isCodeBuddyAuth
+    ? { apiKey: false, baseUrl: false, baseUrlRequired: false }
+    : subscriptionFields ??
+      (service === "search"
         ? searchProviderFields(profile.provider, providerOption)
-        : { apiKey: true, baseUrl: true, baseUrlRequired: false };
+        : { apiKey: true, baseUrl: true, baseUrlRequired: false });
   const missingRequiredBaseUrl =
     fields.baseUrlRequired && !String(profile.base_url || "").trim();
 
@@ -1248,9 +1273,15 @@ function ProfileFields({
               if (renamed !== profile.name) {
                 updateProfileField(service, "name", renamed);
               }
-              if (val === "codebuddy") {
-                updateProfileField(service, "base_url", "");
+              // A credential is provider-specific. Never carry one across a
+              // provider switch where the next adapter could transmit it.
+              if (service === "llm" && val !== providerValue) {
                 updateProfileField(service, "api_key", "");
+              }
+              if (val === "codebuddy" || val === "grok_subscription") {
+                updateProfileField(service, "base_url", "");
+              } else if (val === "cursor_subscription") {
+                updateProfileField(service, "base_url", "");
               } else if (match?.base_url) {
                 updateProfileField(service, "base_url", match.base_url);
               }

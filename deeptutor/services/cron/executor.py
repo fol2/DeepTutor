@@ -39,23 +39,78 @@ def _notification_text(text: str, *, limit: int = 240) -> str:
     return compact[: limit - 1].rstrip() + "…"
 
 
-def _current_user_for_chat_owner(owner: CronOwner) -> CurrentUser:
-    """Rebuild the chat owner's request identity for a scheduled turn."""
+async def _current_user_for_chat_owner(owner: CronOwner) -> CurrentUser | None:
+    """Resolve the owner's *current* identity, never its persisted old role."""
+    from deeptutor.multi_user.identity import get_user_by_id
     from deeptutor.multi_user.models import LOCAL_ADMIN_ID, CurrentUser, UserScope
     from deeptutor.multi_user.paths import local_admin_user, scope_for_user
+    from deeptutor.services import auth as auth_service
 
     owner_id = owner.user_id or LOCAL_ADMIN_ID
-    if owner.is_admin and owner_id == LOCAL_ADMIN_ID:
-        return local_admin_user()
 
-    scope = scope_for_user(owner_id, is_admin=owner.is_admin)
-    if scope.user_id != owner_id:
-        scope = UserScope(kind=scope.kind, user_id=owner_id, root=scope.root)
+    def resolved_scope(*, is_admin: bool) -> UserScope:
+        scope = scope_for_user(owner_id, is_admin=is_admin)
+        if is_admin and scope.user_id != owner_id:
+            return UserScope(kind=scope.kind, user_id=owner_id, root=scope.root)
+        return scope
+
+    if owner_id == LOCAL_ADMIN_ID:
+        return local_admin_user() if not auth_service.AUTH_ENABLED else None
+
+    if owner_id == "env-admin":
+        if (
+            auth_service.AUTH_ENABLED
+            and not auth_service.POCKETBASE_ENABLED
+            and auth_service.AUTH_USERNAME
+            and auth_service.AUTH_PASSWORD_HASH
+        ):
+            return CurrentUser(
+                id=owner_id,
+                username=auth_service.AUTH_USERNAME,
+                role="admin",
+                scope=resolved_scope(is_admin=True),
+            )
+        return None
+
+    if auth_service.POCKETBASE_ENABLED:
+        try:
+            from deeptutor.services.pocketbase_client import get_pb_client
+
+            record = await asyncio.to_thread(
+                get_pb_client().collection("users").get_one,
+                owner_id,
+            )
+        except Exception:
+            logger.warning("Cron owner %s could not be resolved from PocketBase", owner_id)
+            return None
+        if bool(getattr(record, "disabled", False)):
+            return None
+        username = str(
+            getattr(record, "email", None)
+            or getattr(record, "name", None)
+            or getattr(record, "username", None)
+            or owner_id
+        )
+        role = "admin" if str(getattr(record, "role", "user") or "user") == "admin" else "user"
+        return CurrentUser(
+            id=owner_id,
+            username=username,
+            role=role,
+            scope=resolved_scope(is_admin=role == "admin"),
+        )
+
+    found = get_user_by_id(owner_id)
+    if found is None:
+        return None
+    username, record = found
+    if record.get("disabled"):
+        return None
+    role = "admin" if str(record.get("role") or "user") == "admin" else "user"
     return CurrentUser(
         id=owner_id,
-        username=owner_id,
-        role="admin" if owner.is_admin else "user",
-        scope=scope,
+        username=username,
+        role=role,
+        scope=resolved_scope(is_admin=role == "admin"),
     )
 
 
@@ -152,7 +207,9 @@ async def _execute_chat_job(job: CronJob) -> tuple[str, str | None]:
     from deeptutor.runtime.orchestrator import ChatOrchestrator
     from deeptutor.services.session import get_sqlite_session_store
 
-    user = _current_user_for_chat_owner(job.owner)
+    user = await _current_user_for_chat_owner(job.owner)
+    if user is None:
+        return "skipped", "owner account is unavailable"
 
     prompt = _reminder_prompt(job)
     with user_context(user):
