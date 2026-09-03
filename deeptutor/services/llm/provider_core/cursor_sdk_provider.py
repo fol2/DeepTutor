@@ -213,6 +213,11 @@ class CursorSDKProvider(LLMProvider):
                                 content=f"Cursor SDK run ended with status: {status}",
                                 finish_reason="error",
                             )
+                        if not _is_exact_returned_model(getattr(result, "model", None)):
+                            return LLMResponse(
+                                content="Cursor SDK returned a different model; request was rejected",
+                                finish_reason="error",
+                            )
                         if _AUTO_REROUTE_MARKER in content:
                             return LLMResponse(
                                 content="Cursor Grok 4.6 High was unavailable; Auto rerouting was rejected",
@@ -299,24 +304,33 @@ def _high_model_selection(sdk: ModuleType, model: Any) -> Any | None:
 
     for variant in getattr(model, "variants", ()) or ():
         params = tuple(getattr(variant, "params", ()) or ())
-        if _has_high_effort(params) and not _has_fast_enabled(params):
+        if _has_high_effort(params) and _has_fast_disabled(params):
             return sdk.ModelSelection(id=model_id, params=params)
 
-    for parameter in getattr(model, "parameters", ()) or ():
-        parameter_id = str(getattr(parameter, "id", "") or "").lower()
-        allowed = {
+    definitions = {
+        str(getattr(parameter, "id", "") or "").lower(): {
             str(getattr(value, "value", "") or "").lower()
             for value in (getattr(parameter, "values", ()) or ())
         }
-        if parameter_id in _EFFORT_PARAMETER_IDS and "high" in allowed:
-            return sdk.ModelSelection(
-                id=model_id,
-                params=[sdk.ModelParameterValue(id=parameter_id, value="high")],
-            )
-
-    # Current Cursor plans document High as the named-model default. Some
-    # catalogues also encode the effort directly in the model id.
-    return sdk.ModelSelection(id=model_id)
+        for parameter in (getattr(model, "parameters", ()) or ())
+    }
+    effort_id = next(
+        (
+            parameter_id
+            for parameter_id in _EFFORT_PARAMETER_IDS
+            if "high" in definitions.get(parameter_id, set())
+        ),
+        None,
+    )
+    if effort_id is not None and "false" in definitions.get("fast", set()):
+        return sdk.ModelSelection(
+            id=model_id,
+            params=[
+                sdk.ModelParameterValue(id=effort_id, value="high"),
+                sdk.ModelParameterValue(id="fast", value="false"),
+            ],
+        )
+    return None
 
 
 def _has_high_effort(params: Iterable[Any]) -> bool:
@@ -327,12 +341,22 @@ def _has_high_effort(params: Iterable[Any]) -> bool:
     )
 
 
-def _has_fast_enabled(params: Iterable[Any]) -> bool:
+def _has_fast_disabled(params: Iterable[Any]) -> bool:
     return any(
         str(getattr(param, "id", "") or "").lower() == "fast"
-        and str(getattr(param, "value", "") or "").lower() in {"1", "true", "yes"}
+        and str(getattr(param, "value", "") or "").lower() in {"0", "false", "no"}
         for param in params
     )
+
+
+def _is_exact_returned_model(model: Any) -> bool:
+    if str(getattr(model, "id", "") or "").lower() != "grok-4.6":
+        return False
+    params = {
+        str(getattr(param, "id", "") or "").lower(): str(getattr(param, "value", "") or "").lower()
+        for param in (getattr(model, "params", ()) or ())
+    }
+    return params.get("effort") == "high" and params.get("fast") == "false"
 
 
 def _messages_to_input(messages: list[dict[str, Any]]) -> tuple[str, str]:

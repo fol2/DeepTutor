@@ -115,9 +115,10 @@ DEFAULT_UI_SETTINGS = {
     # override on top of this global default.
     "voice_autoplay": False,
     # Seconds the chat UI waits for any turn event before declaring the
-    # connection timed out. Bumped from 60 → 180 so slow tools (image/video
-    # generation) don't trip it; user-adjustable in Settings > Network.
-    "chat_response_timeout": 180,
+    # connection timed out. Slow high-reasoning subscription turns can take up
+    # to five minutes, so the default stays above that provider deadline;
+    # user-adjustable in Settings > Network.
+    "chat_response_timeout": 360,
 }
 
 # Bounds for the chat idle timeout (seconds): long enough for video renders,

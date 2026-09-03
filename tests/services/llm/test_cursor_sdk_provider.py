@@ -35,9 +35,22 @@ class FakeModelSelection:
 
 
 class FakeRun:
-    def __init__(self, *, result: str = "hello", chunks: tuple[str, ...] = ("hel", "lo")):
+    def __init__(
+        self,
+        *,
+        result: str = "hello",
+        chunks: tuple[str, ...] = ("hel", "lo"),
+        result_model: object | None = None,
+    ):
         self.result = result
         self.chunks = chunks
+        self.result_model = result_model or SimpleNamespace(
+            id="grok-4.6",
+            params=(
+                FakeModelParameterValue(id="effort", value="high"),
+                FakeModelParameterValue(id="fast", value="false"),
+            ),
+        )
         self.status = "running"
         self.cancelled = False
         self.iter_text_called = False
@@ -45,7 +58,12 @@ class FakeRun:
 
     async def wait(self):
         self.status = "finished"
-        return SimpleNamespace(status="finished", result=self.result, usage=self.usage)
+        return SimpleNamespace(
+            status="finished",
+            result=self.result,
+            model=self.result_model,
+            usage=self.usage,
+        )
 
     async def iter_text(self):
         self.iter_text_called = True
@@ -126,7 +144,12 @@ def install_fake_sdk(
             id="grok-4.6",
             display_name="Grok 4.6",
             variants=[
-                SimpleNamespace(params=(FakeModelParameterValue(id="effort", value="high"),))
+                SimpleNamespace(
+                    params=(
+                        FakeModelParameterValue(id="effort", value="high"),
+                        FakeModelParameterValue(id="fast", value="false"),
+                    )
+                )
             ],
             parameters=(),
         )
@@ -175,7 +198,10 @@ async def test_cursor_sdk_provider_is_text_only_and_uses_subscription_key(monkey
     }
     create = captured["create"]
     assert create.model.id == "grok-4.6"
-    assert [(item.id, item.value) for item in create.model.params] == [("effort", "high")]
+    assert [(item.id, item.value) for item in create.model.params] == [
+        ("effort", "high"),
+        ("fast", "false"),
+    ]
     assert create.api_key == "cursor-secret"
     assert create.mode == "agent"
     assert create.tools == []
@@ -246,6 +272,17 @@ async def test_cursor_sdk_provider_rejects_auto_reroute(monkeypatch) -> None:
 
     assert response.finish_reason == "error"
     assert response.content == ("Cursor Grok 4.6 High was unavailable; Auto rerouting was rejected")
+
+
+@pytest.mark.asyncio
+async def test_cursor_sdk_provider_rejects_changed_result_model(monkeypatch) -> None:
+    run = FakeRun(result_model=SimpleNamespace(id="auto", params=()))
+    install_fake_sdk(monkeypatch, run=run)
+
+    response = await CursorSDKProvider(api_key="key").chat([{"role": "user", "content": "hello"}])
+
+    assert response.finish_reason == "error"
+    assert response.content == "Cursor SDK returned a different model; request was rejected"
 
 
 @pytest.mark.asyncio

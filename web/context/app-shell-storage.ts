@@ -17,9 +17,13 @@ export const CODE_BLOCK_WRAP_LONG_LINES_STORAGE_KEY =
 // Mirror of the per-user ``chat_response_timeout`` UI preference. Cached in
 // localStorage so the chat watchdog (a separate provider from Settings) can
 // read it synchronously without its own fetch. Kept in sync on settings load.
-export const DEFAULT_CHAT_RESPONSE_TIMEOUT_SECONDS = 180;
+export const DEFAULT_CHAT_RESPONSE_TIMEOUT_SECONDS = 360;
 export const MIN_CHAT_RESPONSE_TIMEOUT_SECONDS = 30;
 export const MAX_CHAT_RESPONSE_TIMEOUT_SECONDS = 1800;
+const LEGACY_CHAT_RESPONSE_TIMEOUT_SECONDS = 180;
+const CHAT_RESPONSE_TIMEOUT_STORAGE_VERSION_KEY =
+  "deeptutor.chatResponseTimeout.version";
+const CHAT_RESPONSE_TIMEOUT_STORAGE_VERSION = "2";
 
 export function clampChatResponseTimeout(seconds: number): number {
   if (!Number.isFinite(seconds)) return DEFAULT_CHAT_RESPONSE_TIMEOUT_SECONDS;
@@ -35,9 +39,31 @@ export function readStoredChatResponseTimeout(): number {
   try {
     const raw = window.localStorage.getItem(CHAT_RESPONSE_TIMEOUT_STORAGE_KEY);
     const parsed = raw ? Number.parseInt(raw, 10) : NaN;
-    return Number.isFinite(parsed) && parsed > 0
+    const resolved = Number.isFinite(parsed) && parsed > 0
       ? clampChatResponseTimeout(parsed)
       : DEFAULT_CHAT_RESPONSE_TIMEOUT_SECONDS;
+    if (
+      window.localStorage.getItem(CHAT_RESPONSE_TIMEOUT_STORAGE_VERSION_KEY) !==
+      CHAT_RESPONSE_TIMEOUT_STORAGE_VERSION
+    ) {
+      // Version 1 stored the then-default 180 seconds. Move that inherited
+      // value to the new provider-safe default once, while preserving any
+      // distinct timeout the user deliberately chose.
+      const migrated =
+        resolved === LEGACY_CHAT_RESPONSE_TIMEOUT_SECONDS
+          ? DEFAULT_CHAT_RESPONSE_TIMEOUT_SECONDS
+          : resolved;
+      window.localStorage.setItem(
+        CHAT_RESPONSE_TIMEOUT_STORAGE_KEY,
+        String(migrated),
+      );
+      window.localStorage.setItem(
+        CHAT_RESPONSE_TIMEOUT_STORAGE_VERSION_KEY,
+        CHAT_RESPONSE_TIMEOUT_STORAGE_VERSION,
+      );
+      return migrated;
+    }
+    return resolved;
   } catch {
     return DEFAULT_CHAT_RESPONSE_TIMEOUT_SECONDS;
   }
@@ -49,6 +75,10 @@ export function writeStoredChatResponseTimeout(seconds: number): void {
     window.localStorage.setItem(
       CHAT_RESPONSE_TIMEOUT_STORAGE_KEY,
       String(clampChatResponseTimeout(seconds)),
+    );
+    window.localStorage.setItem(
+      CHAT_RESPONSE_TIMEOUT_STORAGE_VERSION_KEY,
+      CHAT_RESPONSE_TIMEOUT_STORAGE_VERSION,
     );
   } catch {
     // localStorage may be unavailable

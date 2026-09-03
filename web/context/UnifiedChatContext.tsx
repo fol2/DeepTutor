@@ -1500,7 +1500,7 @@ export function UnifiedChatProvider({
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Idle timeout: if a streaming session receives no events for the configured
-  // window (default 180s, set in Settings > Network), auto-fail it. Read per
+  // window (default 360s, set in Settings > Network), auto-fail it. Read per
   // tick so a settings change applies without remounting.
   useEffect(() => {
     const CHECK_INTERVAL_MS = 10_000;

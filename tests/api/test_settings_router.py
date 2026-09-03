@@ -20,6 +20,16 @@ from deeptutor.services.llm import client as llm_client_module
 from deeptutor.services.llm import config as llm_config_module
 
 
+def test_default_chat_timeout_outlives_slowest_subscription_provider() -> None:
+    from deeptutor.services.llm.provider_core.grok_subscription_provider import (
+        DEFAULT_GROK_TIMEOUT_SECONDS,
+    )
+
+    assert settings_router.DEFAULT_UI_SETTINGS["chat_response_timeout"] > (
+        DEFAULT_GROK_TIMEOUT_SECONDS
+    )
+
+
 def test_load_ui_settings_migrates_legacy_language_to_response_language(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
