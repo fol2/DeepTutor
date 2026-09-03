@@ -40,6 +40,7 @@ class FakeRun:
         self.chunks = chunks
         self.status = "running"
         self.cancelled = False
+        self.iter_text_called = False
         self.usage = SimpleNamespace(input_tokens=7, output_tokens=2, total_tokens=9)
 
     async def wait(self):
@@ -47,6 +48,7 @@ class FakeRun:
         return SimpleNamespace(status="finished", result=self.result, usage=self.usage)
 
     async def iter_text(self):
+        self.iter_text_called = True
         for chunk in self.chunks:
             yield chunk
         self.status = "finished"
@@ -193,7 +195,7 @@ async def test_cursor_sdk_provider_is_text_only_and_uses_subscription_key(monkey
 
 @pytest.mark.asyncio
 async def test_cursor_sdk_provider_streams_text_deltas(monkeypatch) -> None:
-    install_fake_sdk(monkeypatch)
+    _captured, run = install_fake_sdk(monkeypatch)
     deltas: list[str] = []
 
     async def append(text: str) -> None:
@@ -206,6 +208,7 @@ async def test_cursor_sdk_provider_streams_text_deltas(monkeypatch) -> None:
 
     assert response.content == "hello"
     assert deltas == ["hello"]
+    assert run.iter_text_called is False
 
 
 @pytest.mark.asyncio
@@ -226,6 +229,23 @@ async def test_cursor_sdk_provider_hard_limits_buffered_and_streamed_output(monk
     assert response.finish_reason == "length"
     assert response.content != "one two three"
     assert deltas == [response.content]
+    assert run.iter_text_called is False
+
+
+@pytest.mark.asyncio
+async def test_cursor_sdk_provider_rejects_auto_reroute(monkeypatch) -> None:
+    run = FakeRun(
+        result=(
+            '> The model "cursor-grok-4.6-high" is unavailable and you have been '
+            "rerouted to Auto.\n\nhello"
+        )
+    )
+    install_fake_sdk(monkeypatch, run=run)
+
+    response = await CursorSDKProvider(api_key="key").chat([{"role": "user", "content": "hello"}])
+
+    assert response.finish_reason == "error"
+    assert response.content == ("Cursor Grok 4.6 High was unavailable; Auto rerouting was rejected")
 
 
 @pytest.mark.asyncio

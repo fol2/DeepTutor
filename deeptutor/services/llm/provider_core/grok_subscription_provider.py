@@ -20,9 +20,9 @@ from deeptutor.runtime.home import get_runtime_data_root
 from deeptutor.services.llm.provider_core.base import LLMProvider, LLMResponse
 
 DEFAULT_GROK_SUBSCRIPTION_MODEL = "grok-4.6-high"
+DEFAULT_GROK_TIMEOUT_SECONDS = 300.0
 _CLI_MODEL = "grok-4.6"
 _REASONING_EFFORT = "high"
-_DEFAULT_TIMEOUT_SECONDS = 120.0
 _MAX_PROMPT_BYTES = 1_000_000
 _MAX_SYSTEM_PROMPT_BYTES = 65_536
 _MAX_OUTPUT_BYTES = 2_000_000
@@ -57,7 +57,7 @@ class GrokSubscriptionProvider(LLMProvider):
         cli_path: str | None = None,
         auth_home: Path | None = None,
         state_home: Path | None = None,
-        timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+        timeout_seconds: float = DEFAULT_GROK_TIMEOUT_SECONDS,
         profile_id: str | None = None,
         model_id: str | None = None,
     ) -> None:
@@ -486,4 +486,8 @@ def _parse_result(stdout: bytes) -> str:
     return content
 
 
-__all__ = ["DEFAULT_GROK_SUBSCRIPTION_MODEL", "GrokSubscriptionProvider"]
+__all__ = [
+    "DEFAULT_GROK_SUBSCRIPTION_MODEL",
+    "DEFAULT_GROK_TIMEOUT_SECONDS",
+    "GrokSubscriptionProvider",
+]

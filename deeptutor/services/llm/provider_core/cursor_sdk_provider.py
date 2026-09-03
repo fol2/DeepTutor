@@ -20,6 +20,7 @@ _ALLOWED_MODEL_ALIASES = frozenset(
     {DEFAULT_CURSOR_MODEL, "cursor-grok-4.6", "grok-4.6", "grok-4.6-high"}
 )
 _EFFORT_PARAMETER_IDS = frozenset({"effort", "reasoning_effort", "reasoning-effort"})
+_AUTO_REROUTE_MARKER = "is unavailable and you have been rerouted to Auto"
 
 
 class CursorSDKProvider(LLMProvider):
@@ -197,22 +198,24 @@ class CursorSDKProvider(LLMProvider):
                     agent_context = await client.agents.create(options)
                     async with agent_context as agent:
                         run = await agent.send(prompt)
-                        if on_content_delta is None:
-                            result = await run.wait()
-                            content = str(getattr(result, "result", "") or "")
-                        else:
-                            chunks: list[str] = []
-                            async for chunk in run.iter_text():
-                                chunks.append(str(chunk))
-                            content = "".join(chunks)
-                            result = await run.wait()
-                            if not content:
-                                content = str(getattr(result, "result", "") or "")
+                        # Cursor SDK 1.0.30 can silently reroute a specifically
+                        # selected Grok 4.6 run to Auto when ``iter_text()`` is
+                        # used.  Waiting for the same run preserves the exact
+                        # ``grok-4.6`` High/non-fast selection.  The provider
+                        # already buffers before emitting to enforce its hard
+                        # output limit, so expose the final text as one delta.
+                        result = await run.wait()
+                        content = str(getattr(result, "result", "") or "")
 
                         status = str(getattr(result, "status", "finished") or "finished")
                         if status != "finished":
                             return LLMResponse(
                                 content=f"Cursor SDK run ended with status: {status}",
+                                finish_reason="error",
+                            )
+                        if _AUTO_REROUTE_MARKER in content:
+                            return LLMResponse(
+                                content="Cursor Grok 4.6 High was unavailable; Auto rerouting was rejected",
                                 finish_reason="error",
                             )
                         content, truncated = _truncate_to_token_limit(content, max_tokens)

@@ -984,7 +984,11 @@ class CodexOAuthService:
             payload.get("chatgpt_account_id"),
         )
         expires_at = self._positive_int(payload.get("expires_at"))
-        for token in (id_token, access_token):
+        # Requests are authenticated with the access token, so its expiry is
+        # authoritative.  ID tokens are identity metadata and can expire on a
+        # different schedule; preferring one here caused a refresh on every
+        # learner turn after an otherwise successful token rotation.
+        for token in (access_token, id_token):
             if account_id is not None and expires_at is not None:
                 break
             try:
