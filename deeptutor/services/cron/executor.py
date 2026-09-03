@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import uuid
 
-from deeptutor.services.cron.service import CronJob
+from deeptutor.services.cron.service import CronJob, CronOwner
+
+if TYPE_CHECKING:
+    from deeptutor.multi_user.models import CurrentUser
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,26 @@ def _notification_text(text: str, *, limit: int = 240) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: limit - 1].rstrip() + "…"
+
+
+def _current_user_for_chat_owner(owner: CronOwner) -> CurrentUser:
+    """Rebuild the chat owner's request identity for a scheduled turn."""
+    from deeptutor.multi_user.models import LOCAL_ADMIN_ID, CurrentUser, UserScope
+    from deeptutor.multi_user.paths import local_admin_user, scope_for_user
+
+    owner_id = owner.user_id or LOCAL_ADMIN_ID
+    if owner.is_admin and owner_id == LOCAL_ADMIN_ID:
+        return local_admin_user()
+
+    scope = scope_for_user(owner_id, is_admin=owner.is_admin)
+    if scope.user_id != owner_id:
+        scope = UserScope(kind=scope.kind, user_id=owner_id, root=scope.root)
+    return CurrentUser(
+        id=owner_id,
+        username=owner_id,
+        role="admin" if owner.is_admin else "user",
+        scope=scope,
+    )
 
 
 async def _maybe_send_desktop_notification(job: CronJob, text: str) -> None:
@@ -125,20 +148,11 @@ async def _execute_chat_job(job: CronJob) -> tuple[str, str | None]:
     originating session, so the result is waiting in their chat history."""
     from deeptutor.core.context import UnifiedContext
     from deeptutor.core.stream import StreamEventType
-    from deeptutor.multi_user.models import CurrentUser
-    from deeptutor.multi_user.paths import local_admin_user, scope_for_user, user_context
+    from deeptutor.multi_user.paths import user_context
     from deeptutor.runtime.orchestrator import ChatOrchestrator
     from deeptutor.services.session import get_sqlite_session_store
 
-    if job.owner.is_admin:
-        user = local_admin_user()
-    else:
-        user = CurrentUser(
-            id=job.owner.user_id,
-            username=job.owner.user_id,
-            role="user",
-            scope=scope_for_user(job.owner.user_id, is_admin=False),
-        )
+    user = _current_user_for_chat_owner(job.owner)
 
     prompt = _reminder_prompt(job)
     with user_context(user):
