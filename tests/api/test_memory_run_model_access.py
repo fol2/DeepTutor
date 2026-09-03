@@ -26,8 +26,11 @@ LOCAL_GRANTED_MODEL = "llm-model-qwen-granted"
 LOCAL_UNGRANTED_MODEL = "llm-model-qwen-ungranted"
 CURSOR_PROFILE = "llm-profile-cursor-subscription"
 CURSOR_MODEL = "llm-model-cursor-grok-high"
+CURSOR_UNGRANTED_MODEL = "llm-model-cursor-not-granted"
 GROK_PROFILE = "llm-profile-grok-subscription"
 GROK_MODEL = "llm-model-grok-high"
+CODEX_PROFILE = "llm-profile-openai-codex-managed"
+CODEX_MODEL = "llm-model-openai-codex-luna"
 
 
 def _catalog(*, owner_id: str = "u_owner") -> dict[str, Any]:
@@ -79,20 +82,46 @@ def _catalog(*, owner_id: str = "u_owner") -> dict[str, Any]:
                             }
                         ],
                     },
+                    {
+                        "id": CODEX_PROFILE,
+                        "name": "ChatGPT Pro",
+                        "binding": "openai_codex",
+                        "managed_by": "openai_codex_oauth",
+                        "models": [
+                            {
+                                "id": CODEX_MODEL,
+                                "name": "GPT-5.6 Luna",
+                                "model": "gpt-5.6-luna",
+                                "reasoning_effort": "max",
+                            }
+                        ],
+                    },
                 ],
             }
         },
     }
 
 
-def _stale_grant(_user_id: str | None = None) -> dict[str, Any]:
-    """Include old subscription rows to prove their binding overrides the grant."""
+def _family_grant(_user_id: str | None = None) -> dict[str, Any]:
+    """Grant the exact three owner-managed family subscription models."""
     return {
         "models": {
             "llm": [
-                {"profile_id": LOCAL_PROFILE, "model_ids": [LOCAL_GRANTED_MODEL]},
-                {"profile_id": CURSOR_PROFILE, "model_ids": [CURSOR_MODEL]},
-                {"profile_id": GROK_PROFILE, "model_ids": [GROK_MODEL]},
+                {
+                    "profile_id": CURSOR_PROFILE,
+                    "model_ids": [CURSOR_MODEL],
+                    model_access.SUBSCRIPTION_GRANT_ISSUER_FIELD: "u_owner",
+                },
+                {
+                    "profile_id": GROK_PROFILE,
+                    "model_ids": [GROK_MODEL],
+                    model_access.SUBSCRIPTION_GRANT_ISSUER_FIELD: "u_owner",
+                },
+                {
+                    "profile_id": CODEX_PROFILE,
+                    "model_ids": [CODEX_MODEL],
+                    model_access.SUBSCRIPTION_GRANT_ISSUER_FIELD: "u_owner",
+                },
             ]
         }
     }
@@ -155,7 +184,7 @@ def memory_api(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(runs_module, "get_run_manager", lambda: manager)
     monkeypatch.setattr(memory_router, "_runner_for", lambda _req: never_run)
     monkeypatch.setattr(model_access, "admin_catalog", _catalog)
-    monkeypatch.setattr(model_access, "load_grant", _stale_grant)
+    monkeypatch.setattr(model_access, "load_grant", _family_grant)
     monkeypatch.setattr(
         model_access,
         "load_users",
@@ -187,9 +216,13 @@ def memory_api(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.parametrize(
     ("profile_id", "model_id"),
-    [(CURSOR_PROFILE, CURSOR_MODEL), (GROK_PROFILE, GROK_MODEL)],
+    [
+        (CURSOR_PROFILE, CURSOR_MODEL),
+        (GROK_PROFILE, GROK_MODEL),
+        (CODEX_PROFILE, CODEX_MODEL),
+    ],
 )
-def test_ordinary_user_cannot_start_run_with_owner_subscription(
+def test_ordinary_user_can_start_run_with_exact_granted_subscription(
     memory_api,
     tmp_path: Path,
     profile_id: str,
@@ -208,12 +241,26 @@ def test_ordinary_user_cannot_start_run_with_owner_subscription(
         },
     )
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == "This model is not assigned to your account."
-    assert manager.calls == []
+    assert response.status_code == 200
+    expected = {"profile_id": profile_id, "model_id": model_id}
+    assert response.json()["params"]["llm_selection"] == expected
+    assert len(manager.calls) == 1
+    assert manager.calls[0]["params"]["llm_selection"] == expected
 
 
-def test_ordinary_user_cannot_start_run_with_ungranted_model(memory_api, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("profile_id", "model_id"),
+    [
+        (LOCAL_PROFILE, LOCAL_GRANTED_MODEL),
+        (CURSOR_PROFILE, CURSOR_UNGRANTED_MODEL),
+    ],
+)
+def test_ordinary_user_cannot_start_run_with_ungranted_or_wrong_model(
+    memory_api,
+    tmp_path: Path,
+    profile_id: str,
+    model_id: str,
+) -> None:
     client, manager, current = memory_api
     current["user"] = _user(tmp_path)
 
@@ -224,8 +271,8 @@ def test_ordinary_user_cannot_start_run_with_ungranted_model(memory_api, tmp_pat
             "key": "chat",
             "mode": "audit",
             "llm_selection": {
-                "profile_id": LOCAL_PROFILE,
-                "model_id": LOCAL_UNGRANTED_MODEL,
+                "profile_id": profile_id,
+                "model_id": model_id,
             },
         },
     )
@@ -247,7 +294,7 @@ def test_no_selection_is_pinned_to_first_granted_model_before_run_creation(
     )
 
     assert response.status_code == 200
-    expected = {"profile_id": LOCAL_PROFILE, "model_id": LOCAL_GRANTED_MODEL}
+    expected = {"profile_id": CURSOR_PROFILE, "model_id": CURSOR_MODEL}
     assert response.json()["params"]["llm_selection"] == expected
     assert len(manager.calls) == 1
     assert manager.calls[0]["params"]["llm_selection"] == expected
@@ -262,8 +309,8 @@ def test_legacy_wrapper_pins_no_selection_before_run_creation(memory_api, tmp_pa
     assert response.status_code == 200
     assert len(manager.calls) == 1
     assert manager.calls[0]["params"]["llm_selection"] == {
-        "profile_id": LOCAL_PROFILE,
-        "model_id": LOCAL_GRANTED_MODEL,
+        "profile_id": CURSOR_PROFILE,
+        "model_id": CURSOR_MODEL,
     }
 
 

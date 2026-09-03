@@ -62,6 +62,8 @@ class _FakeOrchestrator:
     scripts: list[list[StreamEvent]] = []
     seen_contexts: list[Any] = []
     activated_selections: list[Any] = []
+    activation_users: list[str] = []
+    runtime_users: list[str] = []
     # The memory root in effect while the turn runs — proves the partner reads
     # the owner's (admin) memory via memory_path_service_override, not its own.
     seen_memory_roots: list[Any] = []
@@ -70,9 +72,11 @@ class _FakeOrchestrator:
         pass
 
     async def handle(self, context):
+        from deeptutor.multi_user.context import get_current_user
         from deeptutor.services.memory.paths import memory_root
 
         type(self).seen_contexts.append(context)
+        type(self).runtime_users.append(get_current_user().id)
         type(self).seen_memory_roots.append(memory_root())
         script = type(self).scripts.pop(0) if type(self).scripts else type(self).script
         for event in script:
@@ -88,11 +92,16 @@ def fake_orchestrator(monkeypatch):
     _FakeOrchestrator.scripts = []
     _FakeOrchestrator.seen_contexts = []
     _FakeOrchestrator.activated_selections = []
+    _FakeOrchestrator.activation_users = []
+    _FakeOrchestrator.runtime_users = []
     _FakeOrchestrator.seen_memory_roots = []
     monkeypatch.setattr(orch_mod, "ChatOrchestrator", _FakeOrchestrator)
 
     def _record_activate(selection):
+        from deeptutor.multi_user.context import get_current_user
+
         _FakeOrchestrator.activated_selections.append(selection)
+        _FakeOrchestrator.activation_users.append(get_current_user().id)
         return (None, None)
 
     monkeypatch.setattr(selection_runtime, "activate_llm_selection", _record_activate)

@@ -232,6 +232,8 @@ class ConfigTestRunner:
             binding=resolved.binding,
             provider_name=resolved.provider_name,
             provider_mode=resolved.provider_mode,
+            profile_id=resolved.profile_id,
+            model_id=resolved.model_id,
             api_version=resolved.api_version,
             extra_headers=resolved.extra_headers,
             reasoning_effort=resolved.reasoning_effort,

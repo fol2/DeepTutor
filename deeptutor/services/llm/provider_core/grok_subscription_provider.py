@@ -58,6 +58,8 @@ class GrokSubscriptionProvider(LLMProvider):
         auth_home: Path | None = None,
         state_home: Path | None = None,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+        profile_id: str | None = None,
+        model_id: str | None = None,
     ) -> None:
         super().__init__(api_key=None, api_base=None)
         self.default_model = DEFAULT_GROK_SUBSCRIPTION_MODEL
@@ -65,6 +67,8 @@ class GrokSubscriptionProvider(LLMProvider):
         self._auth_home = auth_home or Path.home()
         self._state_home = state_home or get_runtime_data_root() / "system" / "grok-subscription"
         self._timeout_seconds = max(0.01, float(timeout_seconds))
+        self._profile_id = profile_id
+        self._model_id = model_id
 
     async def chat(
         self,
@@ -78,6 +82,7 @@ class GrokSubscriptionProvider(LLMProvider):
         **kwargs: Any,
     ) -> LLMResponse:
         del tools, temperature, reasoning_effort, tool_choice, kwargs
+        self._require_current_grant(model)
         try:
             _validate_model(model)
             system_prompt, prompt = _build_prompts(messages, max_tokens)
@@ -127,6 +132,17 @@ class GrokSubscriptionProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return self.default_model
+
+    def _require_current_grant(self, model: str | None) -> None:
+        """Recheck the exact logical grant immediately before each CLI dispatch."""
+        from deeptutor.multi_user.model_access import require_deployment_owner_binding
+
+        require_deployment_owner_binding(
+            "grok_subscription",
+            model=model or self.default_model,
+            profile_id=self._profile_id,
+            model_id=self._model_id,
+        )
 
     async def _run_cli(
         self,

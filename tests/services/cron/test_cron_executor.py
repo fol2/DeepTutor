@@ -165,3 +165,102 @@ async def test_deleted_scheduled_owner_is_skipped_before_turn_execution(monkeypa
         "skipped",
         "owner account is unavailable",
     )
+
+
+@pytest.mark.asyncio
+async def test_scheduled_learner_resolves_current_grant_before_turn(monkeypatch) -> None:
+    """Cron stores no model: the owner scope resolves a fresh exact grant."""
+    observed_selection = []
+    reset_tokens = []
+
+    from deeptutor.multi_user import identity, model_access
+    import deeptutor.runtime.orchestrator as orchestrator_module
+    from deeptutor.services.model_selection import runtime as selection_runtime
+    import deeptutor.services.session as session_module
+
+    monkeypatch.setattr(
+        identity,
+        "get_user_by_id",
+        lambda _user_id: ("learner@example.com", {"id": "learner-7", "role": "user"}),
+    )
+    selection = {"profile_id": "cursor", "model_id": "grok-high"}
+    monkeypatch.setattr(
+        model_access,
+        "default_allowed_llm_selection",
+        lambda user_id: selection if user_id == "learner-7" else None,
+    )
+    token = object()
+
+    def activate(candidate):
+        observed_selection.append(candidate)
+        return object(), token
+
+    monkeypatch.setattr(selection_runtime, "activate_llm_selection", activate)
+    monkeypatch.setattr(selection_runtime, "reset_llm_selection", reset_tokens.append)
+
+    class FakeStore:
+        async def get_session(self, _session_id):
+            return object()
+
+        async def get_messages_for_context(self, _session_id):
+            return []
+
+        async def add_message(self, **_kwargs):
+            return None
+
+    class FakeOrchestrator:
+        async def handle(self, _context):
+            yield StreamEvent(
+                type=StreamEventType.RESULT,
+                source="chat",
+                metadata={"response": "Done"},
+            )
+
+    async def no_notification(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(orchestrator_module, "ChatOrchestrator", FakeOrchestrator)
+    monkeypatch.setattr(session_module, "get_sqlite_session_store", lambda: FakeStore())
+    monkeypatch.setattr(executor, "_maybe_send_desktop_notification", no_notification)
+    job = CronJob(
+        id="learner-grant",
+        name="Learner grant",
+        message="Use my assigned model",
+        schedule=CronSchedule(kind="every", every_seconds=3600),
+        owner=CronOwner(kind="chat", user_id="learner-7", session_id="session-1"),
+    )
+
+    assert await executor.execute_job(job) == ("ok", None)
+    assert observed_selection == [selection]
+    assert reset_tokens == [token]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_learner_with_revoked_grant_never_starts_turn(monkeypatch) -> None:
+    from deeptutor.multi_user import identity, model_access
+    import deeptutor.runtime.orchestrator as orchestrator_module
+
+    monkeypatch.setattr(
+        identity,
+        "get_user_by_id",
+        lambda _user_id: ("learner@example.com", {"id": "learner-7", "role": "user"}),
+    )
+    monkeypatch.setattr(model_access, "default_allowed_llm_selection", lambda _user_id: None)
+
+    class UnexpectedOrchestrator:
+        def __init__(self):
+            raise AssertionError("cron must not use the global model after grant revocation")
+
+    monkeypatch.setattr(orchestrator_module, "ChatOrchestrator", UnexpectedOrchestrator)
+    job = CronJob(
+        id="learner-revoked",
+        name="Learner revoked",
+        message="Do not run",
+        schedule=CronSchedule(kind="every", every_seconds=3600),
+        owner=CronOwner(kind="chat", user_id="learner-7", session_id="session-1"),
+    )
+
+    assert await executor.execute_job(job) == (
+        "skipped",
+        "no LLM model is assigned to the account",
+    )

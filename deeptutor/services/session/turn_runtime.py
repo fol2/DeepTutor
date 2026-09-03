@@ -1088,8 +1088,7 @@ class TurnRuntimeManager:
             # (None llm_selection → default config from admin scope).
             from deeptutor.multi_user.context import get_current_user
             from deeptutor.multi_user.model_access import (
-                has_capability_access,
-                redacted_model_access,
+                default_allowed_llm_selection,
             )
 
             current_user = get_current_user()
@@ -1103,23 +1102,14 @@ class TurnRuntimeManager:
                 except PermissionError as exc:
                     raise RuntimeError(str(exc)) from exc
             else:
-                # Single gate, shared with the frontend lock and any HTTP
-                # surface: no usable LLM grant → a clear terminal error here
-                # instead of a silent fall-through to the global client.
-                if not has_capability_access("llm"):
+                # Resolve and pin one grant in a single fresh read. A separate
+                # capability check would leave a revocation race that could
+                # otherwise fall through to the deployment-global client.
+                llm_selection = default_allowed_llm_selection(current_user.id)
+                if not llm_selection:
                     raise RuntimeError(
                         "No LLM model is assigned to your account. Please contact an administrator."
                     )
-                # Pin the first granted-and-available model as the selection.
-                assigned_llms = [
-                    item
-                    for item in redacted_model_access(current_user.id).get("llm", [])
-                    if item.get("available")
-                ]
-                llm_selection = {
-                    "profile_id": assigned_llms[0].get("profile_id"),
-                    "model_id": assigned_llms[0].get("model_id"),
-                }
         if llm_selection:
             from deeptutor.multi_user.personal_models import merge_personal_llm_profiles
             from deeptutor.services.config import get_model_catalog_service
@@ -1130,8 +1120,8 @@ class TurnRuntimeManager:
 
             try:
                 # The compatibility hook deliberately ignores legacy per-user
-                # subscription profiles; only the deployment owner's shared
-                # catalogue can contain one now.
+                # subscription profiles. Grantable subscription models resolve
+                # from the deployment owner's shared catalogue by logical ids.
                 apply_llm_selection_to_catalog(
                     merge_personal_llm_profiles(get_model_catalog_service().load()),
                     LLMSelection.from_payload(llm_selection),

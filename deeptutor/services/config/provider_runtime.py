@@ -528,6 +528,8 @@ class ResolvedLLMConfig:
     model: str
     provider_name: str
     provider_mode: str
+    profile_id: str | None = None
+    model_id: str | None = None
     binding_hint: str | None = None
     binding: str = "openai"
     api_key: str | list[str] = ""
@@ -778,6 +780,8 @@ def resolve_llm_runtime_config(
         model=resolved_model,
         provider_name=spec.name,
         provider_mode=spec.mode,
+        profile_id=_as_str((profile or {}).get("id")) or None,
+        model_id=_as_str((model or {}).get("id")) or None,
         binding_hint=binding_hint,
         binding=spec.name,
         api_key=api_key,

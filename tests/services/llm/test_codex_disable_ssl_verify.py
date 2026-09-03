@@ -30,7 +30,8 @@ def _stub_token_loader(monkeypatch: pytest.MonkeyPatch) -> None:
         account_id = "test-account"
         generation = 1
 
-    async def _fake_load_token(self: Any) -> _Token:
+    async def _fake_load_token(self: Any, service: Any) -> _Token:
+        del service
         return _Token()
 
     class _Service:
@@ -51,9 +52,8 @@ def _stub_token_loader(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(
         openai_codex_provider,
-        "get_codex_oauth_service",
+        "get_codex_deployment_runtime_service",
         lambda: _Service(),
-        raising=False,
     )
     monkeypatch.setattr(openai_codex_provider.OpenAICodexProvider, "_load_token", _fake_load_token)
 

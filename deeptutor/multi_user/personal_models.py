@@ -1,8 +1,9 @@
 """Legacy personal-model compatibility helpers.
 
-Consumer-subscription connectors are deployment-owner-only. Older versions
+Consumer-subscription credentials are deployment-owner-only. Older versions
 could leave a managed Codex profile in an ordinary user's catalogue; those
 profiles are deliberately ignored rather than merged into runtime state.
+Explicit family model grants always resolve against the shared owner catalogue.
 ``owner_catalog_service`` remains the single location helper used by the
 deployment owner's Codex lifecycle.
 """

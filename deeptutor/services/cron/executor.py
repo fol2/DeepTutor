@@ -41,77 +41,10 @@ def _notification_text(text: str, *, limit: int = 240) -> str:
 
 async def _current_user_for_chat_owner(owner: CronOwner) -> CurrentUser | None:
     """Resolve the owner's *current* identity, never its persisted old role."""
-    from deeptutor.multi_user.identity import get_user_by_id
-    from deeptutor.multi_user.models import LOCAL_ADMIN_ID, CurrentUser, UserScope
-    from deeptutor.multi_user.paths import local_admin_user, scope_for_user
-    from deeptutor.services import auth as auth_service
+    from deeptutor.multi_user.context import resolve_current_user_by_id
+    from deeptutor.multi_user.models import LOCAL_ADMIN_ID
 
-    owner_id = owner.user_id or LOCAL_ADMIN_ID
-
-    def resolved_scope(*, is_admin: bool) -> UserScope:
-        scope = scope_for_user(owner_id, is_admin=is_admin)
-        if is_admin and scope.user_id != owner_id:
-            return UserScope(kind=scope.kind, user_id=owner_id, root=scope.root)
-        return scope
-
-    if owner_id == LOCAL_ADMIN_ID:
-        return local_admin_user() if not auth_service.AUTH_ENABLED else None
-
-    if owner_id == "env-admin":
-        if (
-            auth_service.AUTH_ENABLED
-            and not auth_service.POCKETBASE_ENABLED
-            and auth_service.AUTH_USERNAME
-            and auth_service.AUTH_PASSWORD_HASH
-        ):
-            return CurrentUser(
-                id=owner_id,
-                username=auth_service.AUTH_USERNAME,
-                role="admin",
-                scope=resolved_scope(is_admin=True),
-            )
-        return None
-
-    if auth_service.POCKETBASE_ENABLED:
-        try:
-            from deeptutor.services.pocketbase_client import get_pb_client
-
-            record = await asyncio.to_thread(
-                get_pb_client().collection("users").get_one,
-                owner_id,
-            )
-        except Exception:
-            logger.warning("Cron owner %s could not be resolved from PocketBase", owner_id)
-            return None
-        if bool(getattr(record, "disabled", False)):
-            return None
-        username = str(
-            getattr(record, "email", None)
-            or getattr(record, "name", None)
-            or getattr(record, "username", None)
-            or owner_id
-        )
-        role = "admin" if str(getattr(record, "role", "user") or "user") == "admin" else "user"
-        return CurrentUser(
-            id=owner_id,
-            username=username,
-            role=role,
-            scope=resolved_scope(is_admin=role == "admin"),
-        )
-
-    found = get_user_by_id(owner_id)
-    if found is None:
-        return None
-    username, record = found
-    if record.get("disabled"):
-        return None
-    role = "admin" if str(record.get("role") or "user") == "admin" else "user"
-    return CurrentUser(
-        id=owner_id,
-        username=username,
-        role=role,
-        scope=resolved_scope(is_admin=role == "admin"),
-    )
+    return await resolve_current_user_by_id(owner.user_id or LOCAL_ADMIN_ID)
 
 
 async def _maybe_send_desktop_notification(job: CronJob, text: str) -> None:
@@ -213,56 +146,82 @@ async def _execute_chat_job(job: CronJob) -> tuple[str, str | None]:
 
     prompt = _reminder_prompt(job)
     with user_context(user):
-        store = get_sqlite_session_store()
-        session = await store.get_session(job.owner.session_id)
-        if session is None:
-            return "error", "session no longer exists"
-
-        history = await store.get_messages_for_context(job.owner.session_id)
-        context = UnifiedContext(
-            session_id=job.owner.session_id,
-            user_message=prompt,
-            conversation_history=[
-                {"role": m.get("role"), "content": m.get("content")}
-                for m in history
-                if m.get("role") in {"user", "assistant"} and m.get("content")
-            ],
-            active_capability="chat",
-            language=job.owner.language or "en",
-            metadata={
-                "turn_id": f"cron-{job.id}-{uuid.uuid4().hex[:8]}",
-                "source": "cron",
-                "cron_job_id": job.id,
-            },
+        # Cron jobs persist an owner identity, not an LLM credential or model
+        # selection. Resolve the learner's first *current* exact grant only
+        # at dispatch, so a removed grant cannot fall back to the global
+        # deployment model on the next scheduled turn.
+        from deeptutor.multi_user.model_access import default_allowed_llm_selection
+        from deeptutor.services.model_selection.runtime import (
+            activate_llm_selection,
+            reset_llm_selection,
         )
 
-        final_text = ""
-        errors: list[str] = []
-        async for event in ChatOrchestrator().handle(context):
-            meta: dict[str, Any] = event.metadata or {}
-            if event.type == StreamEventType.RESULT and event.source == "chat":
-                final_text = str(meta.get("response") or "")
-            elif event.type == StreamEventType.ERROR and event.content:
-                errors.append(event.content)
+        llm_scope_token = None
+        if not user.is_admin:
+            selection = default_allowed_llm_selection(user.id)
+            if selection is None:
+                return "skipped", "no LLM model is assigned to the account"
+            try:
+                _config, llm_scope_token = activate_llm_selection(selection)
+            except (PermissionError, ValueError) as exc:
+                # The selected profile/model may have been deleted between the
+                # fresh grant lookup and config resolution.  Do not invoke the
+                # orchestrator without a scoped replacement.
+                return "skipped", f"LLM model is no longer available: {exc}"
 
-        if not final_text.strip():
-            return "error", (errors[-1] if errors else "turn produced no answer")
+        try:
+            store = get_sqlite_session_store()
+            session = await store.get_session(job.owner.session_id)
+            if session is None:
+                return "error", "session no longer exists"
 
-        await store.add_message(
-            session_id=job.owner.session_id,
-            role="user",
-            content=prompt,
-            capability="chat",
-            metadata={"cron_job_id": job.id},
-        )
-        await store.add_message(
-            session_id=job.owner.session_id,
-            role="assistant",
-            content=final_text,
-            capability="chat",
-            metadata={"cron_job_id": job.id},
-        )
-        await _maybe_send_desktop_notification(job, final_text)
+            history = await store.get_messages_for_context(job.owner.session_id)
+            context = UnifiedContext(
+                session_id=job.owner.session_id,
+                user_message=prompt,
+                conversation_history=[
+                    {"role": m.get("role"), "content": m.get("content")}
+                    for m in history
+                    if m.get("role") in {"user", "assistant"} and m.get("content")
+                ],
+                active_capability="chat",
+                language=job.owner.language or "en",
+                metadata={
+                    "turn_id": f"cron-{job.id}-{uuid.uuid4().hex[:8]}",
+                    "source": "cron",
+                    "cron_job_id": job.id,
+                },
+            )
+
+            final_text = ""
+            errors: list[str] = []
+            async for event in ChatOrchestrator().handle(context):
+                meta: dict[str, Any] = event.metadata or {}
+                if event.type == StreamEventType.RESULT and event.source == "chat":
+                    final_text = str(meta.get("response") or "")
+                elif event.type == StreamEventType.ERROR and event.content:
+                    errors.append(event.content)
+
+            if not final_text.strip():
+                return "error", (errors[-1] if errors else "turn produced no answer")
+
+            await store.add_message(
+                session_id=job.owner.session_id,
+                role="user",
+                content=prompt,
+                capability="chat",
+                metadata={"cron_job_id": job.id},
+            )
+            await store.add_message(
+                session_id=job.owner.session_id,
+                role="assistant",
+                content=final_text,
+                capability="chat",
+                metadata={"cron_job_id": job.id},
+            )
+            await _maybe_send_desktop_notification(job, final_text)
+        finally:
+            reset_llm_selection(llm_scope_token)
     return "ok", None
 
 

@@ -194,6 +194,8 @@ async def read_pageindex_with_agent(
             api_version=getattr(llm, "api_version", None),
             extra_headers=getattr(llm, "extra_headers", None) or None,
             reasoning_effort=getattr(llm, "reasoning_effort", None),
+            profile_id=getattr(llm, "profile_id", None),
+            model_id=getattr(llm, "model_id", None),
         )
     )
     docs = (

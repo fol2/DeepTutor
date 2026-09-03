@@ -33,6 +33,8 @@ def _provider_cache_key(config: LLMConfig, loop: asyncio.AbstractEventLoop) -> t
         config.provider_name or config.binding,
         config.provider_mode,
         config.model,
+        config.profile_id or "",
+        config.model_id or "",
         _secret_fingerprint(config.api_key),
         config.effective_url or config.base_url or "",
         config.api_version or "",
@@ -55,7 +57,11 @@ def _build_runtime_provider(llm_config: LLMConfig) -> LLMProvider:
             OpenAICodexProvider,
         )
 
-        provider: LLMProvider = OpenAICodexProvider(default_model=llm_config.model)
+        provider: LLMProvider = OpenAICodexProvider(
+            default_model=llm_config.model,
+            profile_id=llm_config.profile_id,
+            model_id=llm_config.model_id,
+        )
     elif backend == "cursor_sdk":
         from deeptutor.services.llm.provider_core.cursor_sdk_provider import (
             CursorSDKProvider,
@@ -64,13 +70,18 @@ def _build_runtime_provider(llm_config: LLMConfig) -> LLMProvider:
         provider = CursorSDKProvider(
             api_key=api_key or None,
             default_model=llm_config.model,
+            profile_id=llm_config.profile_id,
+            model_id=llm_config.model_id,
         )
     elif backend == "grok_subscription":
         from deeptutor.services.llm.provider_core.grok_subscription_provider import (
             GrokSubscriptionProvider,
         )
 
-        provider = GrokSubscriptionProvider()
+        provider = GrokSubscriptionProvider(
+            profile_id=llm_config.profile_id,
+            model_id=llm_config.model_id,
+        )
     elif backend == "github_copilot":
         from deeptutor.services.llm.provider_core.github_copilot_provider import (
             GitHubCopilotProvider,
@@ -144,7 +155,13 @@ def get_runtime_provider(config: LLMConfig | None = None) -> LLMProvider:
     llm_config = config or get_llm_config()
     from deeptutor.multi_user.model_access import require_deployment_owner_binding
 
-    require_deployment_owner_binding(llm_config.provider_name or llm_config.binding)
+    require_deployment_owner_binding(
+        llm_config.provider_name or llm_config.binding,
+        model=llm_config.model,
+        profile_id=llm_config.profile_id,
+        model_id=llm_config.model_id,
+        reasoning_effort=llm_config.reasoning_effort,
+    )
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

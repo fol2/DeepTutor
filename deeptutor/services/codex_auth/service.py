@@ -152,8 +152,10 @@ def _managed_profile(
         "extra_headers": {},
         "managed_by": MANAGED_BY,
         "read_only": True,
-        # A Codex token authorises exactly one person's account, so this
-        # deployment-owner profile is never shared through grants.
+        # A Codex token authorises exactly one person's account, so credential
+        # lifecycle and profile edits stay deployment-owner-only. The owner may
+        # still lend an exact managed model to selected family accounts through
+        # secret-free logical grants.
         "owner_bound": True,
         "models": [_managed_model(model, overrides.get(model.slug)) for model in snapshot.models],
     }
@@ -1147,8 +1149,11 @@ def _owner_model_catalog_service() -> ModelCatalogService:
     return owner_catalog_service()
 
 
-def get_codex_oauth_service() -> CodexOAuthService:
-    secrets_root = _codex_secrets_root()
+def _service_for_roots(
+    secrets_root: Path,
+    model_catalog: ModelCatalogService,
+) -> CodexOAuthService:
+    """Return the one OAuth service for an exact credential root."""
     key = str(secrets_root)
     service = _SERVICE_INSTANCES.get(key)
     if service is None:
@@ -1159,12 +1164,40 @@ def get_codex_oauth_service() -> CodexOAuthService:
         service = CodexOAuthService(
             store,
             catalog,
-            _owner_model_catalog_service(),
+            model_catalog,
             oauth_client=CodexOAuthClient(http),
             callback_forward_port=callback_forward_port,
         )
         _SERVICE_INSTANCES[key] = service
     return service
+
+
+def get_codex_oauth_service() -> CodexOAuthService:
+    """Resolve the caller-scoped service used by owner-only lifecycle routes."""
+    return _service_for_roots(
+        _codex_secrets_root(),
+        _owner_model_catalog_service(),
+    )
+
+
+def get_codex_deployment_runtime_service() -> CodexOAuthService:
+    """Resolve the deployment owner's Codex service for granted inference.
+
+    Learner requests have their own workspace and secret scope, but a granted
+    Codex model deliberately consumes the deployment owner's OAuth session and
+    managed catalogue. Resolve both roots explicitly rather than inheriting the
+    caller's scope. Settings and OAuth lifecycle routes continue to use
+    :func:`get_codex_oauth_service` and therefore remain caller-scoped and
+    owner-gated.
+    """
+    from deeptutor.multi_user.models import LOCAL_ADMIN_ID
+    from deeptutor.multi_user.paths import get_admin_path_service, owner_secrets_dir
+
+    secrets_root = owner_secrets_dir(LOCAL_ADMIN_ID)
+    model_catalog = ModelCatalogService(
+        path=get_admin_path_service().get_settings_file("model_catalog")
+    )
+    return _service_for_roots(secrets_root, model_catalog)
 
 
 async def deliver_codex_oauth_callback(
@@ -1209,6 +1242,7 @@ __all__ = [
     "CodexOAuthService",
     "codex_model_id",
     "deliver_codex_oauth_callback",
+    "get_codex_deployment_runtime_service",
     "get_codex_oauth_service",
     "reconcile_codex_catalog_update",
     "remove_codex_catalog",

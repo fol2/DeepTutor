@@ -10,9 +10,13 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from deeptutor.services.codex_auth import CodexAuthError, get_codex_oauth_service
+from deeptutor.services.codex_auth import CodexAuthError
 from deeptutor.services.codex_auth.constants import CODEX_DEFAULT_MODEL_ID, CODEX_RESPONSES_URL
 from deeptutor.services.codex_auth.contracts import CodexToken
+from deeptutor.services.codex_auth.service import (
+    CodexOAuthService,
+    get_codex_deployment_runtime_service,
+)
 from deeptutor.services.llm.exceptions import LLMProviderTransportError
 from deeptutor.services.llm.openai_http_client import disable_ssl_verify_enabled
 from deeptutor.services.llm.provider_core.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -35,12 +39,36 @@ class CodexHTTPError(RuntimeError):
 class OpenAICodexProvider(LLMProvider):
     """Use OpenAI Codex OAuth tokens to call the Responses API."""
 
-    def __init__(self, default_model: str = CODEX_DEFAULT_MODEL_ID):
+    def __init__(
+        self,
+        default_model: str = CODEX_DEFAULT_MODEL_ID,
+        *,
+        profile_id: str | None = None,
+        model_id: str | None = None,
+    ) -> None:
         super().__init__(api_key=None, api_base=None)
         self.default_model = default_model
+        self._profile_id = profile_id
+        self._model_id = model_id
 
-    async def _load_token(self) -> CodexToken:
-        return await get_codex_oauth_service().get_token()
+    def _require_current_grant(
+        self,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> None:
+        """Recheck the exact logical grant immediately before each OAuth dispatch."""
+        from deeptutor.multi_user.model_access import require_deployment_owner_binding
+
+        require_deployment_owner_binding(
+            "openai_codex",
+            model=model or self.default_model,
+            profile_id=self._profile_id,
+            model_id=self._model_id,
+            reasoning_effort=reasoning_effort,
+        )
+
+    async def _load_token(self, service: CodexOAuthService) -> CodexToken:
+        return await service.get_token()
 
     async def _call_codex(
         self,
@@ -72,10 +100,14 @@ class OpenAICodexProvider(LLMProvider):
         if tools:
             body["tools"] = convert_tools(tools)
 
-        service = get_codex_oauth_service()
+        # Resolve once so the guard, token, catalogue validation, and any 401
+        # recovery all act on the same deployment-owner session. A learner's
+        # current user scope must never redirect one stage to a learner-local
+        # empty credential store.
+        service = get_codex_deployment_runtime_service()
         async with service.inference_guard():
             try:
-                token = await self._load_token()
+                token = await self._load_token(service)
                 service.validate_runtime_profile(token, model_slug, reasoning_effort)
                 headers = _build_headers(token.account_id, token.access_token)
                 try:
@@ -140,6 +172,7 @@ class OpenAICodexProvider(LLMProvider):
         **kwargs: Any,
     ) -> LLMResponse:
         del max_tokens, temperature, kwargs
+        self._require_current_grant(model, reasoning_effort)
         return await self._call_codex(messages, tools, model, reasoning_effort, tool_choice)
 
     async def chat_stream(
@@ -156,6 +189,7 @@ class OpenAICodexProvider(LLMProvider):
         **kwargs: Any,
     ) -> LLMResponse:
         del max_tokens, temperature, on_reasoning_delta, kwargs
+        self._require_current_grant(model, reasoning_effort)
         return await self._call_codex(
             messages,
             tools,

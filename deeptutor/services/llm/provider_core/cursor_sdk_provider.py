@@ -37,10 +37,14 @@ class CursorSDKProvider(LLMProvider):
         default_model: str | None = DEFAULT_CURSOR_MODEL,
         *,
         timeout_seconds: float = DEFAULT_CURSOR_TIMEOUT_SECONDS,
+        profile_id: str | None = None,
+        model_id: str | None = None,
     ) -> None:
         super().__init__(api_key=api_key, api_base=None)
         self.default_model = default_model or DEFAULT_CURSOR_MODEL
         self.timeout_seconds = max(0.001, float(timeout_seconds))
+        self._profile_id = profile_id
+        self._model_id = model_id
 
     async def chat(
         self,
@@ -54,6 +58,7 @@ class CursorSDKProvider(LLMProvider):
         **kwargs: Any,
     ) -> LLMResponse:
         del tools, temperature, reasoning_effort, tool_choice, kwargs
+        self._require_current_grant(model)
         return await self._call_cursor(
             messages,
             model=model,
@@ -82,6 +87,7 @@ class CursorSDKProvider(LLMProvider):
             on_reasoning_delta,
             kwargs,
         )
+        self._require_current_grant(model)
         return await self._call_cursor(
             messages,
             model=model,
@@ -91,6 +97,17 @@ class CursorSDKProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return self.default_model
+
+    def _require_current_grant(self, model: str | None) -> None:
+        """Recheck the exact logical grant immediately before each SDK dispatch."""
+        from deeptutor.multi_user.model_access import require_deployment_owner_binding
+
+        require_deployment_owner_binding(
+            "cursor_subscription",
+            model=model or self.default_model,
+            profile_id=self._profile_id,
+            model_id=self._model_id,
+        )
 
     async def _call_cursor(
         self,

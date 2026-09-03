@@ -127,6 +127,8 @@ async def test_explicit_call_inherits_matching_profile_headers_and_reasoning(
     cfg = _make_cfg(
         extra_headers={"User-Agent": "DeepTutor-Test"},
         reasoning_effort="minimal",
+        profile_id="subscription-profile",
+        model_id="subscription-model",
     )
     provider = _FakeProvider()
     captured_config: dict[str, LLMConfig] = {}
@@ -152,7 +154,35 @@ async def test_explicit_call_inherits_matching_profile_headers_and_reasoning(
     assert result == "ok"
     assert captured_config["config"].extra_headers == {"User-Agent": "DeepTutor-Test"}
     assert captured_config["config"].reasoning_effort == "minimal"
+    assert captured_config["config"].profile_id == "subscription-profile"
+    assert captured_config["config"].model_id == "subscription-model"
     assert provider.complete_kwargs["reasoning_effort"] == "minimal"
+
+
+@pytest.mark.asyncio
+async def test_partial_model_override_drops_unrelated_logical_identity(monkeypatch) -> None:
+    cfg = _make_cfg(
+        model="gpt-5.6-luna",
+        binding="openai_codex",
+        provider_name="openai_codex",
+        profile_id="codex-profile",
+        model_id="luna-model",
+    )
+    provider = _FakeProvider()
+    captured_config: dict[str, LLMConfig] = {}
+    monkeypatch.setattr("deeptutor.services.llm.factory.get_llm_config", lambda: cfg)
+
+    def _fake_get_runtime_provider(config: LLMConfig):
+        captured_config["config"] = config
+        return provider
+
+    monkeypatch.setattr(
+        "deeptutor.services.llm.factory.get_runtime_provider", _fake_get_runtime_provider
+    )
+
+    assert await complete("hello", model="gpt-5.6-sol") == "ok"
+    assert captured_config["config"].profile_id is None
+    assert captured_config["config"].model_id is None
 
 
 @pytest.mark.asyncio

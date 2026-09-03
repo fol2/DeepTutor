@@ -4,13 +4,24 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
-from typing import Any
+import tempfile
+from threading import Lock, RLock
+from typing import Any, Callable
 
 from .identity import get_user_by_id
 from .paths import SYSTEM_ROOT, ensure_system_dirs
 
 GRANTS_DIR = SYSTEM_ROOT / "grants"
+_GRANT_LOCKS: dict[str, RLock] = {}
+_GRANT_LOCKS_GUARD = Lock()
+
+
+def _grant_lock(user_id: str) -> RLock:
+    """Return the process-local lock serialising one user's grant updates."""
+    with _GRANT_LOCKS_GUARD:
+        return _GRANT_LOCKS.setdefault(user_id, RLock())
 
 
 def empty_grant(user_id: str) -> dict[str, Any]:
@@ -88,7 +99,7 @@ def normalize_grant(user_id: str, payload: dict[str, Any] | None) -> dict[str, A
     return base
 
 
-def load_grant(user_id: str) -> dict[str, Any]:
+def _load_grant_unlocked(user_id: str) -> dict[str, Any]:
     path = grant_path(user_id)
     if not path.exists():
         return empty_grant(user_id)
@@ -98,7 +109,12 @@ def load_grant(user_id: str) -> dict[str, Any]:
         return empty_grant(user_id)
 
 
-def save_grant(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+def load_grant(user_id: str) -> dict[str, Any]:
+    with _grant_lock(user_id):
+        return _load_grant_unlocked(user_id)
+
+
+def _validated_grant(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     user_record = get_user_by_id(user_id)
     if user_record is None:
         raise ValueError(f"Unknown user id: {user_id}")
@@ -107,10 +123,56 @@ def save_grant(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Admin users use the main workspace and cannot receive assignments.")
     grant = normalize_grant(user_id, payload)
     validate_grant(grant)
+    return grant
+
+
+def _atomic_write_grant(user_id: str, grant: dict[str, Any]) -> None:
     path = grant_path(user_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(grant, indent=2, ensure_ascii=False), encoding="utf-8")
-    return grant
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(grant, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def save_grant(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate and atomically replace one stored grant."""
+    with _grant_lock(user_id):
+        grant = _validated_grant(user_id, payload)
+        _atomic_write_grant(user_id, grant)
+        return grant
+
+
+def update_grant(
+    user_id: str,
+    update: Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply a read-modify-write grant update under one per-user lock.
+
+    The callback receives a fresh, detached snapshot. Validation and the final
+    atomic file replacement remain inside the same critical section, so a
+    stale administrator edit cannot overwrite a concurrent revocation.
+    """
+    with _grant_lock(user_id):
+        existing = deepcopy(_load_grant_unlocked(user_id))
+        grant = _validated_grant(user_id, update(existing))
+        _atomic_write_grant(user_id, grant)
+        return grant
 
 
 def validate_grant(grant: dict[str, Any]) -> None:

@@ -42,6 +42,34 @@ def _entity(eid: str, content: str = "user uses spaced repetition with FSRS sche
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "module,runner",
+    [
+        (update_mod, "run_update"),
+        (audit_mod, "run_audit"),
+        (dedup_mod, "run_dedup"),
+    ],
+)
+async def test_revoked_selected_model_does_not_fall_back_to_global_config(
+    monkeypatch, module, runner
+) -> None:
+    """A background run must fail before its mode starts when its grant vanished."""
+    from deeptutor.services.model_selection import runtime as selection_runtime
+
+    def revoked(_selection):
+        raise PermissionError("This model is not assigned to your account.")
+
+    monkeypatch.setattr(selection_runtime, "activate_llm_selection", revoked)
+
+    with pytest.raises(PermissionError, match="not assigned"):
+        await getattr(module, runner)(
+            "L2",
+            "chat",
+            llm_selection={"profile_id": "cursor", "model_id": "grok-high"},
+        )
+
+
 # ── update — L2 ─────────────────────────────────────────────────────────
 
 
