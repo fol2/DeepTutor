@@ -115,15 +115,19 @@ DEFAULT_UI_SETTINGS = {
     # override on top of this global default.
     "voice_autoplay": False,
     # Seconds the chat UI waits for any turn event before declaring the
-    # connection timed out. Bumped from 60 → 180 so slow tools (image/video
-    # generation) don't trip it; user-adjustable in Settings > Network.
-    "chat_response_timeout": 180,
+    # connection timed out. Slow high-reasoning subscription turns can take up
+    # to five minutes, so the default stays above that provider deadline;
+    # user-adjustable in Settings > Network.
+    "chat_response_timeout": 360,
 }
 
 # Bounds for the chat idle timeout (seconds): long enough for video renders,
 # capped so a typo can't wedge a turn open forever.
 CHAT_RESPONSE_TIMEOUT_MIN = 30
 CHAT_RESPONSE_TIMEOUT_MAX = 1800
+_CHAT_RESPONSE_TIMEOUT_VERSION_KEY = "_chat_response_timeout_version"
+_CHAT_RESPONSE_TIMEOUT_VERSION = 2
+_LEGACY_CHAT_RESPONSE_TIMEOUT_DEFAULT = 180
 
 
 class SidebarNavOrder(BaseModel):
@@ -351,6 +355,12 @@ def load_ui_settings() -> dict[str, Any]:
                 # resolve_languages owns the legacy migration (a file predating
                 # the UI/response split inherits its one language into both).
                 merged = {**DEFAULT_UI_SETTINGS, **saved, **resolve_languages(saved)}
+                if (
+                    saved.get(_CHAT_RESPONSE_TIMEOUT_VERSION_KEY) != _CHAT_RESPONSE_TIMEOUT_VERSION
+                    and saved.get("chat_response_timeout") == _LEGACY_CHAT_RESPONSE_TIMEOUT_DEFAULT
+                ):
+                    merged["chat_response_timeout"] = DEFAULT_UI_SETTINGS["chat_response_timeout"]
+                merged.pop(_CHAT_RESPONSE_TIMEOUT_VERSION_KEY, None)
                 # Filter persisted enabled_optional_tools to current
                 # toggleable set so retired tool names can't leak into
                 # the per-turn payload.
@@ -1593,7 +1603,10 @@ async def update_chat_response_timeout(update: ChatResponseTimeoutUpdate):
     video generation can take longer than the old 60s default, so this is
     user-adjustable; the chat surface reads it client-side.
     """
-    patch_ui_settings(chat_response_timeout=update.chat_response_timeout)
+    patch_ui_settings(
+        chat_response_timeout=update.chat_response_timeout,
+        **{_CHAT_RESPONSE_TIMEOUT_VERSION_KEY: _CHAT_RESPONSE_TIMEOUT_VERSION},
+    )
     return {"chat_response_timeout": update.chat_response_timeout}
 
 

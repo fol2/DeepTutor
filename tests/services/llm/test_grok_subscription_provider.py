@@ -9,6 +9,7 @@ import signal
 import pytest
 
 from deeptutor.services.llm.provider_core.grok_subscription_provider import (
+    DEFAULT_GROK_TIMEOUT_SECONDS,
     GrokSubscriptionProvider,
 )
 
@@ -148,6 +149,13 @@ def test_default_state_lives_under_the_canonical_runtime_home(
     )
 
     assert provider._state_home == (tmp_path / "data" / "system" / "grok-subscription")
+
+
+def test_default_timeout_allows_a_slow_high_reasoning_turn(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+
+    assert DEFAULT_GROK_TIMEOUT_SECONDS == 300.0
+    assert provider._timeout_seconds == DEFAULT_GROK_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from copy import deepcopy
 import hashlib
 import json
@@ -721,6 +722,14 @@ def _stored_credentials(
         expires_at=expires_at,
         generation=0,
     )
+
+
+def _jwt_for_test(payload: dict[str, object]) -> str:
+    def encode(value: dict[str, object]) -> str:
+        raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    return f"{encode({'alg': 'none'})}.{encode(payload)}.signature"
 
 
 async def _oauth_service(
@@ -1485,6 +1494,32 @@ async def test_get_token_refreshes_inside_five_minute_window(tmp_path: Path) -> 
     assert oauth.refresh_calls == 1
     assert token.access_token == "refreshed-access"
     assert token.generation == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_uses_access_token_expiry_not_expired_id_token(tmp_path: Path) -> None:
+    clock = [1_000]
+    service, _callback, oauth, _catalog, store, _models = await _oauth_service(
+        tmp_path,
+        clock=clock,
+    )
+    store.commit_credentials(
+        _stored_credentials(expires_at=1_200),
+        expected_generation=0,
+    )
+    oauth.refresh_payload.update(
+        {
+            "access_token": _jwt_for_test({"exp": 5_000}),
+            "id_token": _jwt_for_test({"exp": 1_100}),
+        }
+    )
+
+    first = await service.get_token()
+    second = await service.get_token()
+
+    assert first.expires_at == 5_000
+    assert second.expires_at == 5_000
+    assert oauth.refresh_calls == 1
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,48 @@ from deeptutor.services.llm import client as llm_client_module
 from deeptutor.services.llm import config as llm_config_module
 
 
+def test_default_chat_timeout_outlives_slowest_subscription_provider() -> None:
+    from deeptutor.services.llm.provider_core.grok_subscription_provider import (
+        DEFAULT_GROK_TIMEOUT_SECONDS,
+    )
+
+    assert settings_router.DEFAULT_UI_SETTINGS["chat_response_timeout"] > (
+        DEFAULT_GROK_TIMEOUT_SECONDS
+    )
+
+
+def test_load_ui_settings_migrates_legacy_chat_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    settings_file = tmp_path / "interface.json"
+    settings_file.write_text('{"chat_response_timeout": 180}', encoding="utf-8")
+    monkeypatch.setattr(settings_router, "_settings_file", lambda: settings_file)
+
+    settings = settings_router.load_ui_settings()
+
+    assert settings["chat_response_timeout"] == 360
+    assert "_chat_response_timeout_version" not in settings
+
+
+@pytest.mark.asyncio
+async def test_explicit_chat_timeout_is_versioned_and_survives_legacy_migration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    settings_file = tmp_path / "interface.json"
+    monkeypatch.setattr(settings_router, "_settings_file", lambda: settings_file)
+
+    await settings_router.update_chat_response_timeout(
+        settings_router.ChatResponseTimeoutUpdate(chat_response_timeout=180)
+    )
+
+    saved = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert saved == {
+        "chat_response_timeout": 180,
+        "_chat_response_timeout_version": 2,
+    }
+    assert settings_router.load_ui_settings()["chat_response_timeout"] == 180
+
+
 def test_load_ui_settings_migrates_legacy_language_to_response_language(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
